@@ -97,6 +97,8 @@ class HandlerBridge:
                 # Error during run - might be WaitPort block, check if we have replies
                 replies = self.launcher.poll_replies(self.state.reply_port_addr)
                 break
+            # Yield to avoid tight polling loops when no replies are ready.
+            time.sleep(0.001)
         return replies
 
     def _alloc_fib(self):
@@ -131,6 +133,24 @@ class HandlerBridge:
                 if lock == 0:
                     break
             return lock, res2
+
+    def open_file(self, path: str) -> Optional[int]:
+        """Open a file via FINDINPUT and return the FileHandle address."""
+        with self._lock:
+            parts = [p for p in path.split("/") if p]
+            if not parts:
+                return None
+            name = parts[-1]
+            dir_path = "/" + "/".join(parts[:-1])
+            dir_lock, _ = self.locate_path(dir_path)
+            if dir_lock == 0 and dir_path != "/":
+                return None
+            _, name_bptr = self._alloc_bstr(name)
+            fh_addr, _, _ = self.launcher.send_findinput(self.state, name_bptr, dir_lock)
+            replies = self._run_until_replies()
+            if not replies or replies[-1][2] == 0:
+                return None
+            return fh_addr
 
     def list_dir(self, lock_bptr: int) -> List[Dict]:
         with self._lock:
@@ -249,6 +269,27 @@ class HandlerBridge:
             nread = min(replies[-1][2], size)
             return bytes(self.mem.r_block(buf_mem.addr, nread))
 
+    def seek_handle(self, fh_addr: int, offset: int, mode: int = 0):
+        with self._lock:
+            self.launcher.send_seek_handle(self.state, fh_addr, offset, mode)
+            self._run_until_replies()
+
+    def read_handle(self, fh_addr: int, size: int) -> bytes:
+        with self._lock:
+            buf_mem = self.vh.alloc.alloc_memory(size, label="FUSE_READBUF")
+            self.mem.w_block(buf_mem.addr, b"\x00" * size)
+            self.launcher.send_read_handle(self.state, fh_addr, buf_mem.addr, size)
+            replies = self._run_until_replies()
+            if not replies or replies[-1][2] <= 0:
+                return b""
+            nread = min(replies[-1][2], size)
+            return bytes(self.mem.r_block(buf_mem.addr, nread))
+
+    def close_file(self, fh_addr: int):
+        with self._lock:
+            self.launcher.send_end_handle(self.state, fh_addr)
+            self._run_until_replies()
+
 
 class AmigaFuseFS(Operations):
     # macOS special files we should reject immediately without calling handler
@@ -275,6 +316,8 @@ class AmigaFuseFS(Operations):
         self._neg_cache_ttl = 3600.0  # Cache negative results for 1 hour
         self._dir_cache: Dict[str, Tuple[float, List[str]]] = {}  # path -> (timestamp, entries)
         self._dir_cache_ttl = 3600.0  # Cache directory listings for 1 hour
+        self._fh_cache: Dict[int, Dict[str, int]] = {}
+        self._next_fh = 1
         self._last_op_time = time.time()
         self._op_count = 0
 
@@ -411,15 +454,38 @@ class AmigaFuseFS(Operations):
         # read-only
         if flags & (os.O_WRONLY | os.O_RDWR):
             raise FuseOSError(errno.EACCES)
-        if not self.bridge.stat_path(path):
+        fh_addr = self.bridge.open_file(path)
+        if fh_addr is None:
+            info = self.bridge.stat_path(path)
+            if info and info.get("dir_type", 0) >= 0:
+                raise FuseOSError(errno.EISDIR)
             raise FuseOSError(errno.ENOENT)
-        return 0
+        handle = self._next_fh
+        self._next_fh += 1
+        self._fh_cache[handle] = {"fh_addr": fh_addr, "pos": 0}
+        return handle
 
     def read(self, path, size, offset, fh):
-        data = self.bridge.read_file(path, size, offset)
+        entry = self._fh_cache.get(fh)
+        if entry is None:
+            data = self.bridge.read_file(path, size, offset)
+            if data is None:
+                raise FuseOSError(errno.EIO)
+            return data
+        fh_addr = entry["fh_addr"]
+        if offset != entry["pos"]:
+            self.bridge.seek_handle(fh_addr, offset, 0)
+        data = self.bridge.read_handle(fh_addr, size)
         if data is None:
             raise FuseOSError(errno.EIO)
+        entry["pos"] = offset + len(data)
         return data
+
+    def release(self, path, fh):
+        entry = self._fh_cache.pop(fh, None)
+        if entry:
+            self.bridge.close_file(entry["fh_addr"])
+        return 0
 
 
 def mount_fuse(

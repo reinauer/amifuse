@@ -37,6 +37,7 @@ ACTION_STARTUP = 0
 ACTION_DISK_INFO = 25
 ACTION_READ = ord("R")
 ACTION_SEEK = 1008
+ACTION_END = 1007
 
 
 @dataclass
@@ -430,6 +431,18 @@ class HandlerLauncher:
                 fileentry_ptr,
                 offset,
                 mode,
+            ],
+        )
+
+    def send_end_handle(self, state: HandlerLaunchState, fh_addr: int):
+        """ACTION_END on a FileHandle; closes the file handle in the handler."""
+        fh = AccessStruct(self.mem, FileHandleStruct, fh_addr)
+        fileentry_ptr = fh.r_s("fh_Args")
+        return self.send_packet(
+            state,
+            ACTION_END,
+            [
+                fileentry_ptr,
             ],
         )
 

@@ -193,6 +193,11 @@ def main(argv=None):
         action="store_true",
         help="Queue ACTION_STARTUP to the handler's port and report the reply.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable verbose debug output (signature scans, extra dumps).",
+    )
     args = parser.parse_args(argv)
     backend, runtime = None, None
     try:
@@ -451,491 +456,492 @@ def main(argv=None):
                             **{k: (v.hex() if hasattr(v, 'hex') else v) for k, v in la.items()},
                         },
                     )
-                # Scan memory for pfs3 debug signature 'PFS3' written by OpenDiskDevice
-                try:
-                    blob = mem.r_block(0, 0x800000)
-                    for sig_label, sig in (
-                        ("PFSB", b"PFSB"),
-                        ("PFS3", b"PFS3"),
-                        ("AVEC", b"AVEC"),
-                        ("MNTN", b"MNTN"),
-                        ("MKLE", b"MKLE"),
-                        ("EXAM", b"EXAM"),
-                        ("LRUL", b"LRUL"),
-                        ("LRUR", b"LRUR"),
-                        ("LRUI", b"LRUI"),
-                        ("DSIO", b"DSIO"),
-                        ("RRIN", b"RRIN"),
-                        ("RQQ1", b"RQQ1"),
-                        ("RQQ2", b"RQQ2"),
-                        ("GRRD", b"GRRD"),
-                        ("RRCA", b"RRCA"),
-                        ("APOL", b"APOL"),
-                        ("FPOL", b"FPOL"),
-                        ("INIT", b"INIT"),
-                        ("GCR0", b"GCR0"),
-                        ("BOOT", b"BOOT"),
-                        ("CBSZ", b"CBSZ"),
-                        ("PART", b"PART"),
-                    ):
-                        hits = []
-                        idx = blob.find(sig)
-                        while idx != -1 and len(hits) < 10:
-                            if sig_label == "PFSB":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16, 20)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "dp_arg1": vals[0],
-                                        "dp_arg2": vals[1],
-                                        "dp_arg3": vals[2],
-                                        "fssm_ptr": vals[3],
-                                        "dev_bptr": vals[4],
-                                        "dev_aptr": vals[5],
-                                    }
-                                )
-                            elif sig_label == "AVEC":
-                                offsets = (
-                                    0,
-                                    4,
-                                    8,
-                                    12,
-                                    16,
-                                    20,
-                                    24,
-                                    28,
-                                    32,
-                                    36,
-                                    40,
-                                    44,
-                                    48,
-                                    52,
-                                    56,
-                                    60,
-                                    64,
-                                    68,
-                                )
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in offsets
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "size": vals[0],
-                                        "flags": vals[1],
-                                        "ret": vals[2],
-                                        "gptr": vals[3],
-                                        "sp": vals[4],
-                                        "stk": vals[5:9],
-                                        "regs": vals[9:],
-                                    }
-                                )
-                            elif sig_label == "MNTN":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16, 20, 24)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "ptr": vals[0],
-                                        "len": vals[1],
-                                        "b": vals[2:6],
-                                    }
-                                )
-                            elif sig_label == "MKLE":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16, 20)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "type": vals[0],
-                                        "anodenr": vals[1],
-                                        "fl_key": vals[2],
-                                        "fl_task": vals[3],
-                                        "vol_devlist": vals[4],
-                                    }
-                                )
-                            elif sig_label == "EXAM":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big", signed=True)
-                                    for off in (0, 4, 8, 12, 16, 20, 24)
-                                ]
-                                fib = blob[idx + 28 : idx + 28 + 64]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "arg1": vals[0],
-                                        "arg2": vals[1],
-                                        "res1": vals[2],
-                                        "res2": vals[3],
-                                        "lockptr": vals[4],
-                                        "fl_key": vals[5],
-                                        "fib": fib.hex(),
-                                        "fib_raw": fib,
-                                    }
-                                )
-                            elif sig_label == "LRUL":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16, 20)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "poolsize": vals[0],
-                                        "res_blksize": vals[1],
-                                        "bufmem": vals[2],
-                                        "lru_ptr": vals[3],
-                                        "retry": vals[5],
-                                    }
-                                )
-                            elif sig_label == "LRUR":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "rb_reserved": vals[0],
-                                        "rb_cluster": vals[1],
-                                        "env_sizeblock": vals[2],
-                                        "env_num_buffers": vals[3],
-                                    }
-                                )
-                            elif sig_label == "LRUI":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "numbuf": vals[0],
-                                        "poolsize": vals[1],
-                                        "res_blksize": vals[2],
-                                        "bufmem": vals[3],
-                                        "lru_ptr": vals[4],
-                                    }
-                                )
-                            elif sig_label == "DSIO":
-                                def u32(off: int) -> int:
-                                    return int.from_bytes(
-                                        blob[idx + off : idx + off + 4], "big"
-                                    )
-
-                                call = u32(4)
-                                entries = []
-                                base_off = 8
-                                slot_size = 6 * 4
-                                for slot in range(4):
-                                    o = base_off + slot * slot_size
-                                    entries.append(
+                if args.debug:
+                    # Scan memory for pfs3 debug signature 'PFS3' written by OpenDiskDevice
+                    try:
+                        blob = mem.r_block(0, 0x800000)
+                        for sig_label, sig in (
+                            ("PFSB", b"PFSB"),
+                            ("PFS3", b"PFS3"),
+                            ("AVEC", b"AVEC"),
+                            ("MNTN", b"MNTN"),
+                            ("MKLE", b"MKLE"),
+                            ("EXAM", b"EXAM"),
+                            ("LRUL", b"LRUL"),
+                            ("LRUR", b"LRUR"),
+                            ("LRUI", b"LRUI"),
+                            ("DSIO", b"DSIO"),
+                            ("RRIN", b"RRIN"),
+                            ("RQQ1", b"RQQ1"),
+                            ("RQQ2", b"RQQ2"),
+                            ("GRRD", b"GRRD"),
+                            ("RRCA", b"RRCA"),
+                            ("APOL", b"APOL"),
+                            ("FPOL", b"FPOL"),
+                            ("INIT", b"INIT"),
+                            ("GCR0", b"GCR0"),
+                            ("BOOT", b"BOOT"),
+                            ("CBSZ", b"CBSZ"),
+                            ("PART", b"PART"),
+                        ):
+                            hits = []
+                            idx = blob.find(sig)
+                            while idx != -1 and len(hits) < 10:
+                                if sig_label == "PFSB":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16, 20)
+                                    ]
+                                    hits.append(
                                         {
-                                            "slot": u32(o),
-                                            "orig_blk": u32(o + 4),
-                                            "added_blk": u32(o + 8),
-                                            "blk": u32(o + 12),
-                                            "xfer": u32(o + 16),
-                                            "blocks": u32(o + 20),
+                                            "addr": idx,
+                                            "dp_arg1": vals[0],
+                                            "dp_arg2": vals[1],
+                                            "dp_arg3": vals[2],
+                                            "fssm_ptr": vals[3],
+                                            "dev_bptr": vals[4],
+                                            "dev_aptr": vals[5],
                                         }
                                     )
-                                hits.append({"addr": idx, "call": call, "entries": entries})
-                            elif sig_label == "RRIN":
-                                def u32(off: int) -> int:
-                                    return int.from_bytes(
-                                        blob[idx + off : idx + off + 4], "big"
+                                elif sig_label == "AVEC":
+                                    offsets = (
+                                        0,
+                                        4,
+                                        8,
+                                        12,
+                                        16,
+                                        20,
+                                        24,
+                                        28,
+                                        32,
+                                        36,
+                                        40,
+                                        44,
+                                        48,
+                                        52,
+                                        56,
+                                        60,
+                                        64,
+                                        68,
                                     )
-
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "count": u32(4),
-                                        "d0": u32(8),
-                                        "d1": u32(12),
-                                        "d2": u32(16),
-                                        "a0": u32(20),
-                                        "a1": u32(24),
-                                    }
-                                )
-                            elif sig_label in ("RQQ1", "RQQ2"):
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "iter": vals[1],
-                                        "blk": vals[2],
-                                        "blocks": vals[3],
-                                    }
-                                )
-                            elif sig_label == "GRRD":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "iter": vals[1],
-                                        "boot_blk": vals[2],
-                                        "root_blk": vals[3],
-                                    }
-                                )
-                            elif sig_label == "APOL":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "pc": vals[1],
-                                        "pool": vals[2],
-                                        "size": vals[3],
-                                        "ret": vals[4],
-                                    }
-                                )
-                            elif sig_label == "FPOL":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "pc": vals[1],
-                                        "pool": vals[2],
-                                        "ptr": vals[3],
-                                        "size": vals[4],
-                                    }
-                                )
-                            elif sig_label == "RRCA":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "call": vals[1],
-                                        "d0": vals[2],
-                                        "d1": vals[3],
-                                        "d3": vals[4],
-                                    }
-                                )
-                            elif sig_label == "INIT":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "step": vals[0],
-                                        "ret": vals[1],
-                                        "extra": vals[2],
-                                    }
-                                )
-                            elif sig_label == "GCR0":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "step": vals[0],
-                                        "err": vals[1],
-                                        "req": vals[2],
-                                        "extra": vals[3],
-                                        "extra2": vals[4],
-                                    }
-                                )
-                            elif sig_label == "BOOT":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "iter": vals[0],
-                                        "last_signal": vals[1],
-                                        "last_nv_call": vals[2],
-                                        "pad": vals[3],
-                                    }
-                                )
-                            elif sig_label == "CBSZ":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16, 20)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "in_spb": vals[0],
-                                        "in_blocksize": vals[1],
-                                        "env_sizeblock": vals[2],
-                                        "env_spb": vals[3],
-                                        "result": vals[5],
-                                    }
-                                )
-                            elif sig_label == "PART":
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8, 12, 16)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "lowcyl": vals[0],
-                                        "cylsecs": vals[1],
-                                        "first": vals[2],
-                                        "last": vals[3],
-                                    }
-                                )
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in offsets
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "size": vals[0],
+                                            "flags": vals[1],
+                                            "ret": vals[2],
+                                            "gptr": vals[3],
+                                            "sp": vals[4],
+                                            "stk": vals[5:9],
+                                            "regs": vals[9:],
+                                        }
+                                    )
+                                elif sig_label == "MNTN":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16, 20, 24)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "ptr": vals[0],
+                                            "len": vals[1],
+                                            "b": vals[2:6],
+                                        }
+                                    )
+                                elif sig_label == "MKLE":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16, 20)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "type": vals[0],
+                                            "anodenr": vals[1],
+                                            "fl_key": vals[2],
+                                            "fl_task": vals[3],
+                                            "vol_devlist": vals[4],
+                                        }
+                                    )
+                                elif sig_label == "EXAM":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big", signed=True)
+                                        for off in (0, 4, 8, 12, 16, 20, 24)
+                                    ]
+                                    fib = blob[idx + 28 : idx + 28 + 64]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "arg1": vals[0],
+                                            "arg2": vals[1],
+                                            "res1": vals[2],
+                                            "res2": vals[3],
+                                            "lockptr": vals[4],
+                                            "fl_key": vals[5],
+                                            "fib": fib.hex(),
+                                            "fib_raw": fib,
+                                        }
+                                    )
+                                elif sig_label == "LRUL":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16, 20)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "poolsize": vals[0],
+                                            "res_blksize": vals[1],
+                                            "bufmem": vals[2],
+                                            "lru_ptr": vals[3],
+                                            "retry": vals[5],
+                                        }
+                                    )
+                                elif sig_label == "LRUR":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "rb_reserved": vals[0],
+                                            "rb_cluster": vals[1],
+                                            "env_sizeblock": vals[2],
+                                            "env_num_buffers": vals[3],
+                                        }
+                                    )
+                                elif sig_label == "LRUI":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "numbuf": vals[0],
+                                            "poolsize": vals[1],
+                                            "res_blksize": vals[2],
+                                            "bufmem": vals[3],
+                                            "lru_ptr": vals[4],
+                                        }
+                                    )
+                                elif sig_label == "DSIO":
+                                    def u32(off: int) -> int:
+                                        return int.from_bytes(
+                                            blob[idx + off : idx + off + 4], "big"
+                                        )
+    
+                                    call = u32(4)
+                                    entries = []
+                                    base_off = 8
+                                    slot_size = 6 * 4
+                                    for slot in range(4):
+                                        o = base_off + slot * slot_size
+                                        entries.append(
+                                            {
+                                                "slot": u32(o),
+                                                "orig_blk": u32(o + 4),
+                                                "added_blk": u32(o + 8),
+                                                "blk": u32(o + 12),
+                                                "xfer": u32(o + 16),
+                                                "blocks": u32(o + 20),
+                                            }
+                                        )
+                                    hits.append({"addr": idx, "call": call, "entries": entries})
+                                elif sig_label == "RRIN":
+                                    def u32(off: int) -> int:
+                                        return int.from_bytes(
+                                            blob[idx + off : idx + off + 4], "big"
+                                        )
+    
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "count": u32(4),
+                                            "d0": u32(8),
+                                            "d1": u32(12),
+                                            "d2": u32(16),
+                                            "a0": u32(20),
+                                            "a1": u32(24),
+                                        }
+                                    )
+                                elif sig_label in ("RQQ1", "RQQ2"):
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "iter": vals[1],
+                                            "blk": vals[2],
+                                            "blocks": vals[3],
+                                        }
+                                    )
+                                elif sig_label == "GRRD":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "iter": vals[1],
+                                            "boot_blk": vals[2],
+                                            "root_blk": vals[3],
+                                        }
+                                    )
+                                elif sig_label == "APOL":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "pc": vals[1],
+                                            "pool": vals[2],
+                                            "size": vals[3],
+                                            "ret": vals[4],
+                                        }
+                                    )
+                                elif sig_label == "FPOL":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "pc": vals[1],
+                                            "pool": vals[2],
+                                            "ptr": vals[3],
+                                            "size": vals[4],
+                                        }
+                                    )
+                                elif sig_label == "RRCA":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "call": vals[1],
+                                            "d0": vals[2],
+                                            "d1": vals[3],
+                                            "d3": vals[4],
+                                        }
+                                    )
+                                elif sig_label == "INIT":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "step": vals[0],
+                                            "ret": vals[1],
+                                            "extra": vals[2],
+                                        }
+                                    )
+                                elif sig_label == "GCR0":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "step": vals[0],
+                                            "err": vals[1],
+                                            "req": vals[2],
+                                            "extra": vals[3],
+                                            "extra2": vals[4],
+                                        }
+                                    )
+                                elif sig_label == "BOOT":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "iter": vals[0],
+                                            "last_signal": vals[1],
+                                            "last_nv_call": vals[2],
+                                            "pad": vals[3],
+                                        }
+                                    )
+                                elif sig_label == "CBSZ":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16, 20)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "in_spb": vals[0],
+                                            "in_blocksize": vals[1],
+                                            "env_sizeblock": vals[2],
+                                            "env_spb": vals[3],
+                                            "result": vals[5],
+                                        }
+                                    )
+                                elif sig_label == "PART":
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8, 12, 16)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "lowcyl": vals[0],
+                                            "cylsecs": vals[1],
+                                            "first": vals[2],
+                                            "last": vals[3],
+                                        }
+                                    )
+                                else:
+                                    vals = [
+                                        int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
+                                        for off in (0, 4, 8)
+                                    ]
+                                    hits.append(
+                                        {
+                                            "addr": idx,
+                                            "startup": vals[0],
+                                            "dev_bptr": vals[1],
+                                            "dev_aptr": vals[2],
+                                        }
+                                    )
+                                idx = blob.find(sig, idx + 1)
+                            if hits:
+                                if sig_label == "PFSB":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: arg1=0x{h['dp_arg1']:x} arg2=0x{h['dp_arg2']:x} arg3=0x{h['dp_arg3']:x} "
+                                        f"fssm=0x{h['fssm_ptr']:x} dev_bptr=0x{h['dev_bptr']:x} dev_aptr=0x{h['dev_aptr']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "AVEC":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: size=0x{h['size']:x} flags=0x{h['flags']:x} ret=0x{h['ret']:x} g=0x{h['gptr']:x} sp=0x{h['sp']:x} stk={[hex(x) for x in h['stk']]} regs={[hex(x) for x in h['regs']]}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "MNTN":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: ptr=0x{h['ptr']:x} len=0x{h['len']:x} bytes={[hex(x) for x in h['b']]}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "MKLE":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: type=0x{h['type']:x} anode=0x{h['anodenr']:x} fl_Key=0x{h['fl_key']:x} fl_Task=0x{h['fl_task']:x} vol_devlist=0x{h['vol_devlist']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "EXAM":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: arg1=0x{h['arg1']:x} arg2=0x{h['arg2']:x} res1={h['res1']} res2={h['res2']} lockptr=0x{h['lockptr']:x} fl_Key=0x{h['fl_key']:x} fib={h['fib']}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "LRUL":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: poolsize=0x{h['poolsize']:x} res_blksize=0x{h['res_blksize']:x} bufmem=0x{h['bufmem']:x} lru_ptr=0x{h['lru_ptr']:x} retry=0x{h['retry']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "LRUR":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: rb_reserved=0x{h['rb_reserved']:x} rb_cluster=0x{h['rb_cluster']:x} env_sizeblock=0x{h['env_sizeblock']:x} env_num_buffers=0x{h['env_num_buffers']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "LRUI":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: numbuf=0x{h['numbuf']:x} poolsize=0x{h['poolsize']:x} res_blksize=0x{h['res_blksize']:x} bufmem=0x{h['bufmem']:x} lru_ptr=0x{h['lru_ptr']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "DSIO":
+                                    formatted = []
+                                    for h in hits:
+                                        ent_str = "; ".join(
+                                            f"slot=0x{e['slot']:x} orig=0x{e['orig_blk']:x} added=0x{e['added_blk']:x} blk=0x{e['blk']:x} xfer=0x{e['xfer']:x} blocks=0x{e['blocks']:x}"
+                                            for e in h["entries"]
+                                            if any(e.values())
+                                        )
+                                        formatted.append(
+                                            f"0x{h['addr']:x}: call=0x{h['call']:x} {ent_str}"
+                                        )
+                                elif sig_label == "RRIN":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: count=0x{h['count']:x} d0=0x{h['d0']:x} d1=0x{h['d1']:x} d2=0x{h['d2']:x} a0=0x{h['a0']:x} a1=0x{h['a1']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label in ("RQQ1", "RQQ2"):
+                                    formatted = [
+                                        f"0x{h['addr']:x}: iter=0x{h['iter']:x} blk=0x{h['blk']:x} blocks=0x{h['blocks']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "GRRD":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: iter=0x{h['iter']:x} boot=0x{h['boot_blk']:x} root=0x{h['root_blk']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "RRCA":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: call=0x{h['call']:x} d0=0x{h['d0']:x} d1=0x{h['d1']:x} d3=0x{h['d3']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "APOL":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: pc=0x{h['pc']:x} pool=0x{h['pool']:x} size=0x{h['size']:x} ret=0x{h['ret']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "FPOL":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: pc=0x{h['pc']:x} pool=0x{h['pool']:x} ptr=0x{h['ptr']:x} size=0x{h['size']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "INIT":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: step=0x{h['step']:x} ret=0x{h['ret']:x} extra=0x{h['extra']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "GCR0":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: step=0x{h['step']:x} err=0x{h['err']:x} req=0x{h['req']:x} extra=0x{h['extra']:x} extra2=0x{h['extra2']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "BOOT":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: iter=0x{h['iter']:x} last_signal=0x{h['last_signal']:x} last_nv_call=0x{h['last_nv_call']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "CBSZ":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: in_spb=0x{h['in_spb']:x} in_blocksize=0x{h['in_blocksize']:x} env_sizeblock=0x{h['env_sizeblock']:x} env_spb=0x{h['env_spb']:x} result=0x{h['result']:x}"
+                                        for h in hits
+                                    ]
+                                elif sig_label == "PART":
+                                    formatted = [
+                                        f"0x{h['addr']:x}: lowcyl={h['lowcyl']} cylsecs={h['cylsecs']} first={h['first']} last={h['last']}"
+                                        for h in hits
+                                    ]
+                                else:
+                                    formatted = [
+                                        f"0x{h['addr']:x}: startup=0x{h['startup']:x} dev_bptr=0x{h['dev_bptr']:x} dev_aptr=0x{h['dev_aptr']:x}"
+                                        for h in hits
+                                    ]
+                                print(f"Debug signature hits ({sig_label}):", formatted)
                             else:
-                                vals = [
-                                    int.from_bytes(blob[idx + 4 + off : idx + 8 + off], "big")
-                                    for off in (0, 4, 8)
-                                ]
-                                hits.append(
-                                    {
-                                        "addr": idx,
-                                        "startup": vals[0],
-                                        "dev_bptr": vals[1],
-                                        "dev_aptr": vals[2],
-                                    }
-                                )
-                            idx = blob.find(sig, idx + 1)
-                        if hits:
-                            if sig_label == "PFSB":
-                                formatted = [
-                                    f"0x{h['addr']:x}: arg1=0x{h['dp_arg1']:x} arg2=0x{h['dp_arg2']:x} arg3=0x{h['dp_arg3']:x} "
-                                    f"fssm=0x{h['fssm_ptr']:x} dev_bptr=0x{h['dev_bptr']:x} dev_aptr=0x{h['dev_aptr']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "AVEC":
-                                formatted = [
-                                    f"0x{h['addr']:x}: size=0x{h['size']:x} flags=0x{h['flags']:x} ret=0x{h['ret']:x} g=0x{h['gptr']:x} sp=0x{h['sp']:x} stk={[hex(x) for x in h['stk']]} regs={[hex(x) for x in h['regs']]}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "MNTN":
-                                formatted = [
-                                    f"0x{h['addr']:x}: ptr=0x{h['ptr']:x} len=0x{h['len']:x} bytes={[hex(x) for x in h['b']]}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "MKLE":
-                                formatted = [
-                                    f"0x{h['addr']:x}: type=0x{h['type']:x} anode=0x{h['anodenr']:x} fl_Key=0x{h['fl_key']:x} fl_Task=0x{h['fl_task']:x} vol_devlist=0x{h['vol_devlist']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "EXAM":
-                                formatted = [
-                                    f"0x{h['addr']:x}: arg1=0x{h['arg1']:x} arg2=0x{h['arg2']:x} res1={h['res1']} res2={h['res2']} lockptr=0x{h['lockptr']:x} fl_Key=0x{h['fl_key']:x} fib={h['fib']}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "LRUL":
-                                formatted = [
-                                    f"0x{h['addr']:x}: poolsize=0x{h['poolsize']:x} res_blksize=0x{h['res_blksize']:x} bufmem=0x{h['bufmem']:x} lru_ptr=0x{h['lru_ptr']:x} retry=0x{h['retry']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "LRUR":
-                                formatted = [
-                                    f"0x{h['addr']:x}: rb_reserved=0x{h['rb_reserved']:x} rb_cluster=0x{h['rb_cluster']:x} env_sizeblock=0x{h['env_sizeblock']:x} env_num_buffers=0x{h['env_num_buffers']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "LRUI":
-                                formatted = [
-                                    f"0x{h['addr']:x}: numbuf=0x{h['numbuf']:x} poolsize=0x{h['poolsize']:x} res_blksize=0x{h['res_blksize']:x} bufmem=0x{h['bufmem']:x} lru_ptr=0x{h['lru_ptr']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "DSIO":
-                                formatted = []
-                                for h in hits:
-                                    ent_str = "; ".join(
-                                        f"slot=0x{e['slot']:x} orig=0x{e['orig_blk']:x} added=0x{e['added_blk']:x} blk=0x{e['blk']:x} xfer=0x{e['xfer']:x} blocks=0x{e['blocks']:x}"
-                                        for e in h["entries"]
-                                        if any(e.values())
-                                    )
-                                    formatted.append(
-                                        f"0x{h['addr']:x}: call=0x{h['call']:x} {ent_str}"
-                                    )
-                            elif sig_label == "RRIN":
-                                formatted = [
-                                    f"0x{h['addr']:x}: count=0x{h['count']:x} d0=0x{h['d0']:x} d1=0x{h['d1']:x} d2=0x{h['d2']:x} a0=0x{h['a0']:x} a1=0x{h['a1']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label in ("RQQ1", "RQQ2"):
-                                formatted = [
-                                    f"0x{h['addr']:x}: iter=0x{h['iter']:x} blk=0x{h['blk']:x} blocks=0x{h['blocks']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "GRRD":
-                                formatted = [
-                                    f"0x{h['addr']:x}: iter=0x{h['iter']:x} boot=0x{h['boot_blk']:x} root=0x{h['root_blk']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "RRCA":
-                                formatted = [
-                                    f"0x{h['addr']:x}: call=0x{h['call']:x} d0=0x{h['d0']:x} d1=0x{h['d1']:x} d3=0x{h['d3']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "APOL":
-                                formatted = [
-                                    f"0x{h['addr']:x}: pc=0x{h['pc']:x} pool=0x{h['pool']:x} size=0x{h['size']:x} ret=0x{h['ret']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "FPOL":
-                                formatted = [
-                                    f"0x{h['addr']:x}: pc=0x{h['pc']:x} pool=0x{h['pool']:x} ptr=0x{h['ptr']:x} size=0x{h['size']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "INIT":
-                                formatted = [
-                                    f"0x{h['addr']:x}: step=0x{h['step']:x} ret=0x{h['ret']:x} extra=0x{h['extra']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "GCR0":
-                                formatted = [
-                                    f"0x{h['addr']:x}: step=0x{h['step']:x} err=0x{h['err']:x} req=0x{h['req']:x} extra=0x{h['extra']:x} extra2=0x{h['extra2']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "BOOT":
-                                formatted = [
-                                    f"0x{h['addr']:x}: iter=0x{h['iter']:x} last_signal=0x{h['last_signal']:x} last_nv_call=0x{h['last_nv_call']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "CBSZ":
-                                formatted = [
-                                    f"0x{h['addr']:x}: in_spb=0x{h['in_spb']:x} in_blocksize=0x{h['in_blocksize']:x} env_sizeblock=0x{h['env_sizeblock']:x} env_spb=0x{h['env_spb']:x} result=0x{h['result']:x}"
-                                    for h in hits
-                                ]
-                            elif sig_label == "PART":
-                                formatted = [
-                                    f"0x{h['addr']:x}: lowcyl={h['lowcyl']} cylsecs={h['cylsecs']} first={h['first']} last={h['last']}"
-                                    for h in hits
-                                ]
-                            else:
-                                formatted = [
-                                    f"0x{h['addr']:x}: startup=0x{h['startup']:x} dev_bptr=0x{h['dev_bptr']:x} dev_aptr=0x{h['dev_aptr']:x}"
-                                    for h in hits
-                                ]
-                            print(f"Debug signature hits ({sig_label}):", formatted)
-                        else:
-                            print(f"Debug signature hits ({sig_label}): none")
-                except Exception as e:
-                    print("Debug signature scan failed:", e)
+                                print(f"Debug signature hits ({sig_label}): none")
+                    except Exception as e:
+                        print("Debug signature scan failed:", e)
                 if state.run_state and not isinstance(state.run_state, dict) and getattr(state.run_state, "error", None):
                     cpu = vh.machine.cpu
                     mem = vh.alloc.get_mem()
