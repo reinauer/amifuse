@@ -72,6 +72,9 @@ class HandlerBridge:
         self.mem = self.vh.alloc.get_mem()
         # cache a best-effort volume name
         self._volname = None
+        self._fib_mem = None
+        self._read_buf_mem = None
+        self._read_buf_size = 0
         print(
             f"[amifuse] handler loaded seg_baddr=0x{seg_baddr:x} entry=0x{entry_addr:x} "
             f"port=0x{self.state.port_addr:x} reply=0x{self.state.reply_port_addr:x}"
@@ -102,9 +105,19 @@ class HandlerBridge:
         return replies
 
     def _alloc_fib(self):
-        fib_mem = self.vh.alloc.alloc_struct(FileInfoBlockStruct, label="FUSE_FIB")
-        self.mem.w_block(fib_mem.addr, b"\x00" * FileInfoBlockStruct.get_size())
-        return fib_mem
+        if self._fib_mem is None:
+            self._fib_mem = self.vh.alloc.alloc_struct(
+                FileInfoBlockStruct, label="FUSE_FIB"
+            )
+        self.mem.w_block(self._fib_mem.addr, b"\x00" * FileInfoBlockStruct.get_size())
+        return self._fib_mem
+
+    def _alloc_read_buf(self, size: int):
+        if self._read_buf_mem is None or size > self._read_buf_size:
+            self._read_buf_mem = self.vh.alloc.alloc_memory(size, label="FUSE_READBUF")
+            self._read_buf_size = size
+        self.mem.w_block(self._read_buf_mem.addr, b"\x00" * size)
+        return self._read_buf_mem
 
     def _alloc_bstr(self, text: str):
         return self.launcher.alloc_bstr(text, label="FUSE_BSTR")
@@ -260,8 +273,7 @@ class HandlerBridge:
             if offset:
                 self.launcher.send_seek_handle(self.state, fh_addr, offset, 0)  # OFFSET_BEGINNING
                 self._run_until_replies()
-            buf_mem = self.vh.alloc.alloc_memory(size, label="FUSE_READBUF")
-            self.mem.w_block(buf_mem.addr, b"\x00" * size)
+            buf_mem = self._alloc_read_buf(size)
             self.launcher.send_read_handle(self.state, fh_addr, buf_mem.addr, size)
             replies = self._run_until_replies()
             if not replies or replies[-1][2] <= 0:
@@ -276,8 +288,20 @@ class HandlerBridge:
 
     def read_handle(self, fh_addr: int, size: int) -> bytes:
         with self._lock:
-            buf_mem = self.vh.alloc.alloc_memory(size, label="FUSE_READBUF")
-            self.mem.w_block(buf_mem.addr, b"\x00" * size)
+            buf_mem = self._alloc_read_buf(size)
+            self.launcher.send_read_handle(self.state, fh_addr, buf_mem.addr, size)
+            replies = self._run_until_replies()
+            if not replies or replies[-1][2] <= 0:
+                return b""
+            nread = min(replies[-1][2], size)
+            return bytes(self.mem.r_block(buf_mem.addr, nread))
+
+
+    def read_handle_at(self, fh_addr: int, offset: int, size: int) -> bytes:
+        with self._lock:
+            self.launcher.send_seek_handle(self.state, fh_addr, offset, 0)  # OFFSET_BEGINNING
+            self._run_until_replies()
+            buf_mem = self._alloc_read_buf(size)
             self.launcher.send_read_handle(self.state, fh_addr, buf_mem.addr, size)
             replies = self._run_until_replies()
             if not replies or replies[-1][2] <= 0:
@@ -316,7 +340,8 @@ class AmigaFuseFS(Operations):
         self._neg_cache_ttl = 3600.0  # Cache negative results for 1 hour
         self._dir_cache: Dict[str, Tuple[float, List[str]]] = {}  # path -> (timestamp, entries)
         self._dir_cache_ttl = 3600.0  # Cache directory listings for 1 hour
-        self._fh_cache: Dict[int, Dict[str, int]] = {}
+        self._fh_lock = threading.Lock()
+        self._fh_cache: Dict[int, Dict[str, object]] = {}
         self._next_fh = 1
         self._last_op_time = time.time()
         self._op_count = 0
@@ -460,30 +485,46 @@ class AmigaFuseFS(Operations):
             if info and info.get("dir_type", 0) >= 0:
                 raise FuseOSError(errno.EISDIR)
             raise FuseOSError(errno.ENOENT)
-        handle = self._next_fh
-        self._next_fh += 1
-        self._fh_cache[handle] = {"fh_addr": fh_addr, "pos": 0}
+        with self._fh_lock:
+            handle = self._next_fh
+            self._next_fh += 1
+            self._fh_cache[handle] = {
+                "fh_addr": fh_addr,
+                "pos": 0,
+                "lock": threading.Lock(),
+                "closed": False,
+            }
         return handle
 
     def read(self, path, size, offset, fh):
-        entry = self._fh_cache.get(fh)
+        with self._fh_lock:
+            entry = self._fh_cache.get(fh)
         if entry is None:
             data = self.bridge.read_file(path, size, offset)
             if data is None:
                 raise FuseOSError(errno.EIO)
             return data
         fh_addr = entry["fh_addr"]
-        if offset != entry["pos"]:
-            self.bridge.seek_handle(fh_addr, offset, 0)
-        data = self.bridge.read_handle(fh_addr, size)
-        if data is None:
-            raise FuseOSError(errno.EIO)
-        entry["pos"] = offset + len(data)
-        return data
+        with entry["lock"]:
+            if entry.get("closed"):
+                raise FuseOSError(errno.EIO)
+            if offset != entry["pos"]:
+                data = self.bridge.read_handle_at(fh_addr, offset, size)
+            else:
+                data = self.bridge.read_handle(fh_addr, size)
+            if data is None:
+                raise FuseOSError(errno.EIO)
+            entry["pos"] = offset + len(data)
+            return data
 
     def release(self, path, fh):
-        entry = self._fh_cache.pop(fh, None)
-        if entry:
+        with self._fh_lock:
+            entry = self._fh_cache.get(fh)
+            if not entry:
+                return 0
+            entry["closed"] = True
+            del self._fh_cache[fh]
+        with entry["lock"]:
             self.bridge.close_file(entry["fh_addr"])
         return 0
 
@@ -502,14 +543,14 @@ def mount_fuse(
         )
     bridge = HandlerBridge(image, driver, block_size=block_size)
     volname = volname_opt or bridge.volume_name()
-    # Single-threaded mode with aggressive caching to minimize macOS polling.
+    # Multi-threaded mode with caching to minimize macOS polling.
     FUSE(
         AmigaFuseFS(bridge, debug=debug),
         str(mountpoint),
         foreground=True,
         ro=True,
         allow_other=False,
-        nothreads=True,  # Single-threaded - simpler and avoids lock contention
+        nothreads=False,  # Multi-threaded; handler bridge serializes access
         fsname=f"amifuse:{volname}",
         volname=volname,
         subtype="amifuse",
