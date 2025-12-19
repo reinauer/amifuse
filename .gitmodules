@@ -1,0 +1,4 @@
+[submodule "amitools"]
+	path = amitools
+	url = ../amitools.git
+	branch = Filesystems
