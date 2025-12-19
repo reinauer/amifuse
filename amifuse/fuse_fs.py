@@ -80,10 +80,11 @@ class HandlerBridge:
             f"port=0x{self.state.port_addr:x} reply=0x{self.state.reply_port_addr:x}"
         )
 
-    def _run_until_replies(self, max_iters: int = 50, cycles: int = 200_000):
+    def _run_until_replies(self, max_iters: int = 50, cycles: int = 200_000, sleep_base: float = 0.0005, sleep_max: float = 0.01):
         """Run handler bursts until at least one reply is queued or iterations exhausted."""
         from amitools.vamos.lib.ExecLibrary import ExecLibrary
         replies = []
+        sleep_time = sleep_base
         for i in range(max_iters):
             self.launcher.run_burst(self.state, max_cycles=cycles)
             rs = self.state.run_state
@@ -100,8 +101,10 @@ class HandlerBridge:
                 # Error during run - might be WaitPort block, check if we have replies
                 replies = self.launcher.poll_replies(self.state.reply_port_addr)
                 break
-            # Yield to avoid tight polling loops when no replies are ready.
-            time.sleep(0.001)
+            # Yield with exponential backoff to avoid tight polling loops.
+            if sleep_base > 0:
+                time.sleep(sleep_time)
+                sleep_time = min(sleep_time * 2, sleep_max)
         return replies
 
     def _alloc_fib(self):
