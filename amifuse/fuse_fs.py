@@ -7,6 +7,10 @@ FINDINPUT/SEEK/READ packets.
 import argparse
 import errno
 import os
+import shutil
+import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -544,6 +548,41 @@ def mount_fuse(
         raise SystemExit(
             f"Mountpoint {mountpoint} is already a mount; unmount it first (e.g. umount -f {mountpoint})."
         )
+
+    def _unmount_mountpoint():
+        if not mountpoint.exists() or not os.path.ismount(mountpoint):
+            return
+        if sys.platform.startswith("darwin"):
+            cmd = ["umount", "-f", str(mountpoint)]
+        else:
+            if shutil.which("fusermount"):
+                cmd = ["fusermount", "-u", str(mountpoint)]
+            else:
+                cmd = ["umount", "-f", str(mountpoint)]
+        subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def _start_signal_watcher():
+        def _watch():
+            sig = signal.sigwait({signal.SIGINT, signal.SIGTERM})
+            if debug:
+                print(f"[amifuse] signal {sig} received; unmounting {mountpoint}")
+            _unmount_mountpoint()
+            os._exit(0)
+
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+            threading.Thread(target=_watch, daemon=True).start()
+        except (AttributeError, ValueError):
+            def _handler(signum, _frame):
+                if debug:
+                    print(f"[amifuse] signal {signum} received; unmounting {mountpoint}")
+                _unmount_mountpoint()
+                os._exit(0)
+
+            signal.signal(signal.SIGINT, _handler)
+            signal.signal(signal.SIGTERM, _handler)
+
+    _start_signal_watcher()
     bridge = HandlerBridge(image, driver, block_size=block_size)
     volname = volname_opt or bridge.volume_name()
     # Multi-threaded mode with caching to minimize macOS polling.
