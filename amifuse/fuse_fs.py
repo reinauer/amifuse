@@ -79,6 +79,10 @@ class HandlerBridge:
         self._fib_mem = None
         self._read_buf_mem = None
         self._read_buf_size = 0
+        self._neg_cache: Dict[str, float] = {}
+        # Short negative cache for handler lookups; tune for RW.
+        # A newly created file might be invisible for up to TTL seconds, then it will appear normally.
+        self._neg_cache_ttl = 10.0
         print(
             f"[amifuse] handler loaded seg_baddr=0x{seg_baddr:x} entry=0x{entry_addr:x} "
             f"port=0x{self.state.port_addr:x} reply=0x{self.state.reply_port_addr:x}"
@@ -129,6 +133,16 @@ class HandlerBridge:
     def _alloc_bstr(self, text: str):
         return self.launcher.alloc_bstr(text, label="FUSE_BSTR")
 
+    def _is_neg_cached(self, path: str) -> bool:
+        if path in self._neg_cache:
+            if time.time() - self._neg_cache[path] < self._neg_cache_ttl:
+                return True
+            del self._neg_cache[path]
+        return False
+
+    def _set_neg_cached(self, path: str):
+        self._neg_cache[path] = time.time()
+
     def locate(self, lock_bptr: int, name: str):
         with self._lock:
             _, name_bptr = self._alloc_bstr(name)
@@ -139,6 +153,8 @@ class HandlerBridge:
     def locate_path(self, path: str) -> Tuple[int, int]:
         """Return a lock BPTR for the given absolute path."""
         with self._lock:
+            if path and path != "/" and self._is_neg_cached(path):
+                return 0, -1
             parts = [p for p in path.split("/") if p]
             lock = 0
             res2 = 0
@@ -152,11 +168,15 @@ class HandlerBridge:
                 res2 = replies[-1][3] if replies else -1
                 if lock == 0:
                     break
+            if lock == 0 and path and path != "/":
+                self._set_neg_cached(path)
             return lock, res2
 
     def open_file(self, path: str) -> Optional[int]:
         """Open a file via FINDINPUT and return the FileHandle address."""
         with self._lock:
+            if path and path != "/" and self._is_neg_cached(path):
+                return None
             parts = [p for p in path.split("/") if p]
             if not parts:
                 return None
@@ -164,11 +184,15 @@ class HandlerBridge:
             dir_path = "/" + "/".join(parts[:-1])
             dir_lock, _ = self.locate_path(dir_path)
             if dir_lock == 0 and dir_path != "/":
+                if path and path != "/":
+                    self._set_neg_cached(path)
                 return None
             _, name_bptr = self._alloc_bstr(name)
             fh_addr, _, _ = self.launcher.send_findinput(self.state, name_bptr, dir_lock)
             replies = self._run_until_replies()
             if not replies or replies[-1][2] == 0:
+                if path and path != "/":
+                    self._set_neg_cached(path)
                 return None
             return fh_addr
 
@@ -262,6 +286,8 @@ class HandlerBridge:
 
     def read_file(self, path: str, size: int, offset: int) -> bytes:
         with self._lock:
+            if path and path != "/" and self._is_neg_cached(path):
+                return b""
             # split into parent lock + name
             parts = [p for p in path.split("/") if p]
             if not parts:
@@ -270,11 +296,15 @@ class HandlerBridge:
             dir_path = "/" + "/".join(parts[:-1])
             dir_lock, _ = self.locate_path(dir_path)
             if dir_lock == 0 and dir_path != "/":
+                if path and path != "/":
+                    self._set_neg_cached(path)
                 return b""
             _, name_bptr = self._alloc_bstr(name)
             fh_addr, _, _ = self.launcher.send_findinput(self.state, name_bptr, dir_lock)
             replies = self._run_until_replies()
             if not replies or replies[-1][2] == 0:
+                if path and path != "/":
+                    self._set_neg_cached(path)
                 return b""
             # optional seek
             if offset:
