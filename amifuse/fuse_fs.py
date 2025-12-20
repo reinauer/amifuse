@@ -290,7 +290,7 @@ class HandlerBridge:
                     self._set_neg_cached(path)
                 return None
             _, name_bptr = self._alloc_bstr(name)
-            mode = flags & os.O_ACCMODE
+            mode = flags & getattr(os, 'O_ACCMODE', 3)
             if mode == os.O_RDONLY:
                 fh_addr = self._alloc_fh()
                 self.launcher.send_findinput(self.state, name_bptr, dir_lock, fh_addr)
@@ -603,8 +603,8 @@ class AmigaFuseFS(Operations):
     ):
         self.bridge = bridge
         self._debug = debug
-        self._uid = os.getuid()
-        self._gid = os.getgid()
+        self._uid = getattr(os, 'getuid', lambda: 0)()
+        self._gid = getattr(os, 'getgid', lambda: 0)()
         self._stat_cache: Dict[str, Tuple[float, Dict]] = {}  # path -> (timestamp, stat_result)
         self._cache_ttl = 3600.0  # Cache for 1 hour - read-only FS never changes
         self._neg_cache: Dict[str, float] = {}  # path -> timestamp for ENOENT results
@@ -1091,23 +1091,24 @@ def mount_fuse(
     volname = volname_opt or bridge.volume_name()
     # Multi-threaded mode with caching to minimize macOS polling.
     use_threads = not write
-    FUSE(
-        AmigaFuseFS(bridge, debug=debug),
-        str(mountpoint),
-        foreground=True,
-        ro=not write,
-        allow_other=False,
-        nothreads=not use_threads,
-        fsname=f"amifuse:{volname}",
-        volname=volname,
-        subtype="amifuse",
+    fuse_kwargs = {
+        "foreground": True,
+        "ro": not write,
+        "allow_other": False,
+        "nothreads": not use_threads,
+        "fsname": f"amifuse:{volname}",
+        "subtype": "amifuse",
+        "default_permissions": True,  # Let kernel handle permission checks
+    }
+    if sys.platform.startswith("darwin"):
         # macOS-specific options to reduce Finder/Spotlight polling
-        local=True,  # Tell macOS this is a local FS
-        noappledouble=True,  # Disable AppleDouble ._ files
-        noapplexattr=True,  # Disable Apple extended attributes
-        # Kernel-level caching (in seconds) - dramatically reduces getattr calls
-        default_permissions=True,  # Let kernel handle permission checks
-    )
+        fuse_kwargs.update({
+            "volname": volname,  # Volume name shown in Finder
+            "local": True,  # Tell macOS this is a local FS (not network)
+            "noappledouble": True,  # Disable AppleDouble ._ files
+            "noapplexattr": True,  # Disable Apple extended attributes
+        })
+    FUSE(AmigaFuseFS(bridge, debug=debug), str(mountpoint), **fuse_kwargs)
 
 
 def main(argv=None):
