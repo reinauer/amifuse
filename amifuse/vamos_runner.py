@@ -5,6 +5,7 @@ machine, memory map, path manager, scheduler, and lib manager, and loads
 the handler into memory so we can later jump into it.
 """
 
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +29,7 @@ class VamosHandlerRuntime:
         self.scheduler = None
         self.slm: Optional[SetupLibManager] = None
         self.seglist_baddr: Optional[int] = None
+        self._temp_dir: Optional[tempfile.TemporaryDirectory] = None
 
     def setup(self):
         # Use default vamos configs (bin argument required, so pass a dummy).
@@ -42,14 +44,19 @@ class VamosHandlerRuntime:
             machine_cfg.ram_size = 8192
         trace_cfg = mp.get_trace_dict().trace
         path_cfg = mp.get_path_dict()
+        # Create a temp directory for vamos path manager to avoid permission
+        # issues when amitools tries to create volume directories in vols_base_dir.
+        # Using "/" would try to create /system etc. which requires root.
+        self._temp_dir = tempfile.TemporaryDirectory(prefix="amifuse_")
+        temp_path = self._temp_dir.name
         # Avoid touching ~/.vamos/volumes; keep auto volumes/assigns disabled here.
         path_cfg["path"]["auto_volumes"] = []
         path_cfg["path"]["auto_assigns"] = []
-        path_cfg["path"]["vols_base_dir"] = "/"
-        path_cfg["path"]["cwd"] = "root:/"
-        path_cfg["path"]["command"] = ["root:/"]
-        # Provide a minimal root: volume pointing to host "/" so cwd resolves.
-        path_cfg["volumes"] = ["root:/"]
+        path_cfg["path"]["vols_base_dir"] = temp_path
+        path_cfg["path"]["cwd"] = f"root:{temp_path}"
+        path_cfg["path"]["command"] = [f"root:{temp_path}"]
+        # Provide a minimal root: volume pointing to temp dir so cwd resolves.
+        path_cfg["volumes"] = [f"root:{temp_path}"]
         path_cfg["assigns"] = {}
         libs_cfg = mp.get_libs_dict()
 
@@ -118,3 +125,6 @@ class VamosHandlerRuntime:
             self.mem_map.cleanup()
         if self.machine:
             self.machine.cleanup()
+        if self._temp_dir:
+            self._temp_dir.cleanup()
+            self._temp_dir = None
