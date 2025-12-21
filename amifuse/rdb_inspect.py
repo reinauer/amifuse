@@ -21,22 +21,42 @@ import amitools.fs.DosType as DosType  # type: ignore  # noqa: E402
 def open_rdisk(
     image: Path, block_size: Optional[int] = None
 ) -> Tuple[RawBlockDevice, RDisk]:
-    """Open an RDB image read-only and return the block device + parsed RDisk."""
+    """Open an RDB image read-only and return the block device + parsed RDisk.
+
+    Scans blocks 0-15 for the RDB signature (RDSK), as the RDB can be located
+    at any of these blocks depending on the disk geometry.
+    """
+    from amitools.fs.block.rdb.RDBlock import RDBlock
+
     initial_block_size = block_size or 512
     blkdev = RawBlockDevice(str(image), read_only=True, block_bytes=initial_block_size)
     blkdev.open()
-    rdisk = RDisk(blkdev)
 
-    # Auto-adjust block size if we started with a guess.
-    if block_size is None:
-        peeked_size = rdisk.peek_block_size()
-        if peeked_size and peeked_size != blkdev.block_bytes:
-            blkdev.close()
-            blkdev = RawBlockDevice(
-                str(image), read_only=True, block_bytes=peeked_size
-            )
-            blkdev.open()
-            rdisk = RDisk(blkdev)
+    # Scan blocks 0-15 for RDB signature
+    rdb_blk_num = None
+    for blk_num in range(16):
+        rdb = RDBlock(blkdev, blk_num)
+        if rdb.read():
+            rdb_blk_num = blk_num
+            # Check if we need to adjust block size
+            if block_size is None and rdb.block_size != blkdev.block_bytes:
+                blkdev.close()
+                blkdev = RawBlockDevice(
+                    str(image), read_only=True, block_bytes=rdb.block_size
+                )
+                blkdev.open()
+            break
+
+    if rdb_blk_num is None:
+        blkdev.close()
+        raise IOError(f"No valid RDB found in blocks 0-15 at {image}")
+
+    # Create RDisk and open - need to set rdb manually since we already found it
+    rdisk = RDisk(blkdev)
+    rdisk.rdb = RDBlock(blkdev, rdb_blk_num)
+    if not rdisk.rdb.read():
+        blkdev.close()
+        raise IOError(f"Failed to read RDB at block {rdb_blk_num} in {image}")
 
     if not rdisk.open():
         blkdev.close()
