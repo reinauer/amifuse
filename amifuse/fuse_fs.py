@@ -1154,10 +1154,20 @@ def mount_fuse(
     # Get partition name for display and auto-mountpoint
     part_name = get_partition_name(image, block_size, partition)
 
-    # Auto-create mountpoint on macOS if not specified
+    # Auto-create mountpoint on macOS/Windows if not specified
     if mountpoint is None:
         if sys.platform.startswith("darwin"):
             mountpoint = Path(f"/Volumes/{volname_opt or part_name}")
+        elif sys.platform.startswith("win"):
+            # Find first available drive letter (starting from A:)
+            import string
+            for letter in string.ascii_uppercase:
+                drive = f"{letter}:"
+                if not os.path.exists(drive):
+                    mountpoint = Path(drive)
+                    break
+            if mountpoint is None:
+                raise SystemExit("No available drive letter found. Use --mountpoint to specify one.")
         else:
             raise SystemExit("--mountpoint is required on Linux")
 
@@ -1297,7 +1307,7 @@ def main(argv=None):
     )
     mount_parser.add_argument("--driver", required=True, type=Path, help="Filesystem binary")
     mount_parser.add_argument("--image", required=True, type=Path, help="Disk image file")
-    mount_parser.add_argument("--mountpoint", type=Path, help="Mount location (default: /Volumes/<partition> on macOS)")
+    mount_parser.add_argument("--mountpoint", type=Path, help="Mount location (default: /Volumes/<partition> on macOS, first free drive letter on Windows)")
     mount_parser.add_argument(
         "--partition", type=str, help="Partition name (e.g. DH0) or index (defaults to first)."
     )
