@@ -80,7 +80,18 @@ class BlockDeviceBackend:
             raise RuntimeError("Block device not open")
         if self.read_only:
             raise PermissionError("Backend opened read-only")
+        # Debug: track that writes are happening
+        if not hasattr(self, '_write_count'):
+            self._write_count = 0
+        self._write_count += 1
+        if self._write_count <= 5 or self._write_count % 100 == 0:
+            print(f"[backend] write_blocks blk={blk_num} num={num_blks} (total writes: {self._write_count})", flush=True)
         self.blkdev.write_block(blk_num, data, num_blks)
+
+    def sync(self):
+        """Flush any buffered writes to the underlying file."""
+        if self.blkdev:
+            self.blkdev.flush()
 
     def describe(self) -> str:
         assert self.rdb is not None

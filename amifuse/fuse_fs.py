@@ -593,7 +593,26 @@ class HandlerBridge:
             replies = self._run_until_replies()
             self._log_replies("end", replies)
             # Note: ACTION_FLUSH is for flushing volume buffers, not file-specific.
+            # We call flush_volume() on unmount instead of after every file close.
             self._free_fh(fh_addr)
+
+    def flush_volume(self):
+        """Flush the handler's buffers to disk. Call on unmount."""
+        with self._lock:
+            if self.state.crashed:
+                return
+            if self._debug:
+                print("[amifuse] Flushing volume buffers to disk...", flush=True)
+            self.launcher.send_flush(self.state)
+            replies = self._run_until_replies()
+            self._log_replies("flush_volume", replies)
+            # Sync the underlying file to disk
+            self.backend.sync()
+            if self._debug:
+                if replies and replies[-1][2] != 0:
+                    print("[amifuse] Volume flush complete", flush=True)
+                else:
+                    print("[amifuse] Volume flush may have failed", flush=True)
 
 
 class AmigaFuseFS(Operations):
@@ -1095,6 +1114,13 @@ class AmigaFuseFS(Operations):
                 self.bridge.free_lock(parent_lock)
         return 0
 
+    def destroy(self, path):
+        """Called when filesystem is unmounted. Flush handler buffers."""
+        print("[amifuse] Unmounting - flushing volume...", flush=True)
+        if self.bridge._write_enabled:
+            self.bridge.flush_volume()
+        print("[amifuse] Unmount complete.", flush=True)
+
 
 def mount_fuse(
     image: Path,
@@ -1126,31 +1152,11 @@ def mount_fuse(
                 cmd = ["umount", "-f", str(mountpoint)]
         subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    def _start_signal_watcher():
-        def _watch():
-            sig = signal.sigwait({signal.SIGINT, signal.SIGTERM})
-            if debug:
-                print(f"[amifuse] signal {sig} received; unmounting {mountpoint}")
-            _unmount_mountpoint()
-            os._exit(0)
-
-        try:
-            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
-            threading.Thread(target=_watch, daemon=True).start()
-        except (AttributeError, ValueError):
-            def _handler(signum, _frame):
-                if debug:
-                    print(f"[amifuse] signal {signum} received; unmounting {mountpoint}")
-                _unmount_mountpoint()
-                os._exit(0)
-
-            signal.signal(signal.SIGINT, _handler)
-            signal.signal(signal.SIGTERM, _handler)
-
-    _start_signal_watcher()
     bridge = HandlerBridge(
         image, driver, block_size=block_size, read_only=not write, debug=debug
     )
+
+    # Let default signal handling work - FUSE will call destroy() on unmount
     volname = volname_opt or bridge.volume_name()
     # Multi-threaded mode with caching to minimize macOS polling.
     use_threads = not write
