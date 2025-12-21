@@ -112,10 +112,11 @@ class HandlerBridge:
         self._write_enabled = not read_only
         if self._write_enabled:
             self._neg_cache_ttl = 0.0
-        print(
-            f"[amifuse] handler loaded seg_baddr=0x{seg_baddr:x} entry=0x{entry_addr:x} "
-            f"port=0x{self.state.port_addr:x} reply=0x{self.state.reply_port_addr:x}"
-        )
+        if self._debug:
+            print(
+                f"[amifuse] handler loaded seg_baddr=0x{seg_baddr:x} entry=0x{entry_addr:x} "
+                f"port=0x{self.state.port_addr:x} reply=0x{self.state.reply_port_addr:x}"
+            )
 
     def _run_until_replies(self, max_iters: int = 50, cycles: int = 200_000, sleep_base: float = 0.0005, sleep_max: float = 0.01):
         """Run handler bursts until at least one reply is queued or iterations exhausted."""
@@ -1123,20 +1124,61 @@ class AmigaFuseFS(Operations):
         print("[amifuse] Unmount complete.", flush=True)
 
 
+def get_partition_name(image: Path, block_size: Optional[int], partition: Optional[str]) -> str:
+    """Get the partition name from RDB without starting the handler."""
+    from .rdb_inspect import open_rdisk
+    blkdev, rdisk = open_rdisk(image, block_size=block_size)
+    try:
+        if partition is None:
+            part = rdisk.get_partition(0)
+        else:
+            part = rdisk.find_partition_by_string(str(partition))
+        if part is None:
+            return "AmigaFS"
+        return str(part.get_drive_name())
+    finally:
+        rdisk.close()
+        blkdev.close()
+
+
 def mount_fuse(
     image: Path,
     driver: Path,
-    mountpoint: Path,
+    mountpoint: Optional[Path],
     block_size: Optional[int],
     volname_opt: Optional[str] = None,
     debug: bool = False,
     write: bool = False,
     partition: Optional[str] = None,
 ):
+    # Get partition name for display and auto-mountpoint
+    part_name = get_partition_name(image, block_size, partition)
+
+    # Auto-create mountpoint on macOS if not specified
+    if mountpoint is None:
+        if sys.platform.startswith("darwin"):
+            mountpoint = Path(f"/Volumes/{volname_opt or part_name}")
+        else:
+            raise SystemExit("--mountpoint is required on Linux")
+
     if mountpoint.exists() and os.path.ismount(mountpoint):
         raise SystemExit(
             f"Mountpoint {mountpoint} is already a mount; unmount it first (e.g. umount -f {mountpoint})."
         )
+
+    # Create mountpoint directory if it doesn't exist
+    # On macOS /Volumes, FUSE creates the mount point automatically
+    if not mountpoint.exists():
+        if sys.platform.startswith("darwin") and str(mountpoint).startswith("/Volumes/"):
+            # macFUSE will create the mount point in /Volumes
+            pass
+        else:
+            mountpoint.mkdir(parents=True)
+
+    # Print startup banner
+    print(f"amifuse {__version__} - Copyright (C) 2025 by Stefan Reinauer")
+    print(f"Mounting partition '{part_name}' from {image}")
+    print(f"Mount point: {mountpoint}")
 
     if write:
         # Guard against accidental writes without explicit intent.
@@ -1255,7 +1297,7 @@ def main(argv=None):
     )
     mount_parser.add_argument("--driver", required=True, type=Path, help="Filesystem binary")
     mount_parser.add_argument("--image", required=True, type=Path, help="Disk image file")
-    mount_parser.add_argument("--mountpoint", required=True, type=Path, help="Mount location")
+    mount_parser.add_argument("--mountpoint", type=Path, help="Mount location (default: /Volumes/<partition> on macOS)")
     mount_parser.add_argument(
         "--partition", type=str, help="Partition name (e.g. DH0) or index (defaults to first)."
     )

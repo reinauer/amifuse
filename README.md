@@ -71,6 +71,10 @@ make unpack     # Extracts pfs.hdf and copies pfs3aio to current directory
 Then mount with:
 
 ```bash
+# macOS: auto-mounts to /Volumes/<partition_name>
+amifuse mount --driver pfs3aio --image pfs.hdf
+
+# Linux: requires explicit mountpoint
 mkdir -p ./mnt
 amifuse mount --driver pfs3aio --image pfs.hdf --mountpoint ./mnt
 ```
@@ -112,7 +116,7 @@ amifuse mount --driver pfs3aio --image /path/to/disk.hdf --mountpoint ./mnt
 |----------|----------|-------------|
 | `--driver` | Yes | Path to the Amiga filesystem handler binary (e.g., `pfs3aio`) |
 | `--image` | Yes | Path to the Amiga hard disk image file |
-| `--mountpoint` | Yes | Directory where the filesystem will be mounted |
+| `--mountpoint` | macOS: No, Linux: Yes | Directory where the filesystem will be mounted (macOS default: `/Volumes/<partition>`) |
 | `--partition` | No | Partition name (e.g., `DH0`) or index (default: first partition) |
 | `--block-size` | No | Override block size (default: auto-detect or 512) |
 | `--volname` | No | Override the volume name shown in Finder |
@@ -123,24 +127,26 @@ amifuse mount --driver pfs3aio --image /path/to/disk.hdf --mountpoint ./mnt
 ### Examples
 
 ```bash
-# Create mount point
-mkdir -p ./mnt
-
-# Mount a PFS3 formatted disk image (first partition)
-amifuse mount --driver pfs3aio --image pfs.hdf --mountpoint ./mnt
+# macOS: Mount a PFS3 formatted disk image (auto-creates /Volumes/<partition>)
+amifuse mount --driver pfs3aio --image pfs.hdf
 
 # Mount a specific partition by name
-amifuse mount --driver pfs3aio --image multi-partition.hdf --partition DH0 --mountpoint ./mnt
+amifuse mount --driver pfs3aio --image multi-partition.hdf --partition DH0
 
 # Mount a specific partition by index
-amifuse mount --driver pfs3aio --image multi-partition.hdf --partition 2 --mountpoint ./mnt
+amifuse mount --driver pfs3aio --image multi-partition.hdf --partition 2
+
+# Linux: Explicit mountpoint required
+mkdir -p ./mnt
+amifuse mount --driver pfs3aio --image pfs.hdf --mountpoint ./mnt
 
 # Browse the filesystem
-ls ./mnt
-find ./mnt -type f
+ls /Volumes/PDH0   # macOS
+ls ./mnt           # Linux
 
 # Unmount when done (Ctrl+C in the terminal, or:)
-umount ./mnt
+umount /Volumes/PDH0   # macOS
+umount ./mnt           # Linux
 ```
 
 ## Additional Tools
