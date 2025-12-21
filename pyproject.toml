@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amifuse"
+version = "0.1.0"
+description = "Mount Amiga filesystem images via FUSE using native AmigaOS handlers"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "BSD-2-Clause"}
+authors = [
+    {name = "Stefan Reinauer"},
+]
+keywords = ["amiga", "fuse", "filesystem", "pfs3", "m68k"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Filesystems",
+]
+
+dependencies = [
+    "fusepy>=3.0",
+    "machine68k>=0.3.0",
+]
+
+[project.scripts]
+amifuse = "amifuse.fuse_fs:main"
+
+[project.urls]
+Homepage = "https://github.com/reinauer/amifuse"
+
+[tool.setuptools.packages.find]
+include = ["amifuse*"]

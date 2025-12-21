@@ -15,7 +15,7 @@ amifuse runs actual Amiga filesystem drivers (like PFS3) through m68k CPU emulat
 
 ```bash
 # Clone the repository with submodules
-git clone --recursive https://github.com/YOUR_USER/amifuse.git
+git clone --recursive https://github.com/reinauer/amifuse.git
 cd amifuse
 
 # Or if already cloned, initialize submodules
