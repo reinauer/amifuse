@@ -111,6 +111,53 @@ find ./mnt -type f
 umount ./mnt
 ```
 
+## Additional Tools
+
+### rdb-inspect
+
+Inspect RDB (Rigid Disk Block) images to view partition information and embedded filesystem drivers.
+
+```bash
+# Show partition summary
+rdb-inspect /path/to/disk.hdf
+
+# Show full partition details
+rdb-inspect --full /path/to/disk.hdf
+
+# Output as JSON
+rdb-inspect --json /path/to/disk.hdf
+
+# Extract embedded filesystem driver #0 to a file
+rdb-inspect --extract-fs 0 --out pfs3.bin /path/to/disk.hdf
+```
+
+| Argument | Description |
+|----------|-------------|
+| `image` | Path to the RDB image file |
+| `--block-size` | Block size in bytes (default: auto-detect or 512) |
+| `--full` | Show full partition details |
+| `--json` | Output parsed RDB as JSON |
+| `--extract-fs N` | Extract filesystem entry N (0-based) to a file |
+| `--out` | Output path for extracted filesystem (default: auto-derived) |
+
+### driver-info
+
+Inspect Amiga filesystem handler binaries to verify they can be relocated and display segment information.
+
+```bash
+# Inspect a filesystem handler
+driver-info pfs3aio
+
+# Use a custom base address
+driver-info --base 0x200000 pfs3aio
+```
+
+| Argument | Description |
+|----------|-------------|
+| `binary` | Path to the filesystem handler binary |
+| `--base` | Base address for relocation (default: 0x100000) |
+| `--padding` | Padding between segments when relocating |
+
 ## Supported Filesystems
 
 Currently tested with:

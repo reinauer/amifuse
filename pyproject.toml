@@ -30,6 +30,8 @@ dependencies = [
 
 [project.scripts]
 amifuse = "amifuse.fuse_fs:main"
+rdb-inspect = "amifuse.rdb_inspect:main"
+driver-info = "amifuse.driver_info:main"
 
 [project.urls]
 Homepage = "https://github.com/reinauer/amifuse"
