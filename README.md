@@ -72,11 +72,11 @@ Then mount with:
 
 ```bash
 # macOS: auto-mounts to /Volumes/<partition_name>, uses embedded driver from RDB
-amifuse mount --image pfs.hdf
+amifuse mount pfs.hdf
 
 # Linux: requires explicit mountpoint
 mkdir -p ./mnt
-amifuse mount --image pfs.hdf --mountpoint ./mnt
+amifuse mount pfs.hdf --mountpoint ./mnt
 ```
 
 ## Usage
@@ -85,7 +85,7 @@ amifuse uses subcommands for different operations:
 
 ```bash
 amifuse inspect <image>                    # Inspect RDB partitions
-amifuse mount --driver <handler> ...       # Mount a filesystem
+amifuse mount <image>                      # Mount a filesystem
 ```
 
 ### Inspecting Disk Images
@@ -109,13 +109,13 @@ amifuse inspect --full /path/to/disk.hdf
 ### Mounting Filesystems
 
 ```bash
-amifuse mount --driver pfs3aio --image /path/to/disk.hdf --mountpoint ./mnt
+amifuse mount /path/to/disk.hdf
 ```
 
 | Argument | Required | Description |
 |----------|----------|-------------|
+| `image` | Yes | Path to the Amiga hard disk image file |
 | `--driver` | No | Path to filesystem handler binary (default: extract from RDB if available) |
-| `--image` | Yes | Path to the Amiga hard disk image file |
 | `--mountpoint` | macOS/Windows: No, Linux: Yes | Mount location (macOS: `/Volumes/<partition>`, Windows: first free drive letter) |
 | `--partition` | No | Partition name (e.g., `DH0`) or index (default: first partition) |
 | `--block-size` | No | Override block size (default: auto-detect or 512) |
@@ -128,20 +128,20 @@ amifuse mount --driver pfs3aio --image /path/to/disk.hdf --mountpoint ./mnt
 
 ```bash
 # macOS: Mount using embedded filesystem driver from RDB (simplest)
-amifuse mount --image disk.hdf
+amifuse mount disk.hdf
 
 # macOS: Mount with explicit driver
-amifuse mount --driver pfs3aio --image pfs.hdf
+amifuse mount pfs.hdf --driver pfs3aio
 
 # Mount a specific partition by name
-amifuse mount --image multi-partition.hdf --partition DH0
+amifuse mount multi-partition.hdf --partition DH0
 
 # Mount a specific partition by index
-amifuse mount --image multi-partition.hdf --partition 2
+amifuse mount multi-partition.hdf --partition 2
 
 # Linux: Explicit mountpoint required
 mkdir -p ./mnt
-amifuse mount --image disk.hdf --mountpoint ./mnt
+amifuse mount disk.hdf --mountpoint ./mnt
 
 # Browse the filesystem
 ls /Volumes/PDH0   # macOS

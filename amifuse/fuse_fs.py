@@ -1383,8 +1383,8 @@ def main(argv=None):
     mount_parser = subparsers.add_parser(
         "mount", help="Mount an Amiga filesystem image via FUSE."
     )
+    mount_parser.add_argument("image", type=Path, help="Disk image file")
     mount_parser.add_argument("--driver", type=Path, help="Filesystem binary (default: extract from RDB if available)")
-    mount_parser.add_argument("--image", required=True, type=Path, help="Disk image file")
     mount_parser.add_argument("--mountpoint", type=Path, help="Mount location (default: /Volumes/<partition> on macOS, first free drive letter on Windows)")
     mount_parser.add_argument(
         "--partition", type=str, help="Partition name (e.g. DH0) or index (defaults to first)."
