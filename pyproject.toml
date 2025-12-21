@@ -26,6 +26,7 @@ classifiers = [
 dependencies = [
     "fusepy>=3.0",
     "machine68k>=0.3.0",
+    "amitools @ git+https://github.com/reinauer/amitools.git",
 ]
 
 [project.scripts]
