@@ -121,6 +121,11 @@ class HandlerBridge:
         from amitools.vamos.lib.ExecLibrary import ExecLibrary
         replies = []
         sleep_time = sleep_base
+
+        # Check if handler has crashed - if so, don't try to run it
+        if self.state.crashed:
+            return []
+
         # If we previously blocked in WaitPort, reset to the saved return address.
         waitport_sp = ExecLibrary._waitport_blocked_sp
         if waitport_sp is not None:
@@ -145,6 +150,9 @@ class HandlerBridge:
         for i in range(max_iters):
             self.launcher.run_burst(self.state, max_cycles=cycles)
             rs = self.state.run_state
+            # Check if handler crashed during this burst
+            if self.state.crashed:
+                return []
             # Check for replies first - if we have them, we're done
             replies = self.launcher.poll_replies(self.state.reply_port_addr)
             if replies:
@@ -299,13 +307,20 @@ class HandlerBridge:
                     return None
                 if flags & os.O_TRUNC:
                     fh_addr = self._alloc_fh()
+                    if self._debug:
+                        print(f"[amifuse][open_file] FINDOUTPUT name={name!r} dir_lock=0x{dir_lock:x} fh_addr=0x{fh_addr:x}", flush=True)
                     self.launcher.send_findoutput(self.state, name_bptr, dir_lock, fh_addr)
                 else:
                     fh_addr = self._alloc_fh()
+                    if self._debug:
+                        print(f"[amifuse][open_file] FINDUPDATE name={name!r} dir_lock=0x{dir_lock:x} fh_addr=0x{fh_addr:x}", flush=True)
                     self.launcher.send_findupdate(self.state, name_bptr, dir_lock, fh_addr)
             replies = self._run_until_replies()
             self._log_replies("find", replies)
             if not replies or replies[-1][2] == 0:
+                if self._debug:
+                    res2 = replies[-1][3] if replies else -1
+                    print(f"[amifuse][open_file] FAILED: replies={bool(replies)} res1={replies[-1][2] if replies else 'none'} res2={res2}", flush=True)
                 if path and path != "/":
                     self._set_neg_cached(path)
                 self._free_fh(fh_addr)
@@ -577,10 +592,7 @@ class HandlerBridge:
             self.launcher.send_end_handle(self.state, fh_addr)
             replies = self._run_until_replies()
             self._log_replies("end", replies)
-            if self._write_enabled:
-                self.launcher.send_flush(self.state)
-                flush_replies = self._run_until_replies()
-                self._log_replies("flush", flush_replies)
+            # Note: ACTION_FLUSH is for flushing volume buffers, not file-specific.
             self._free_fh(fh_addr)
 
 
@@ -692,8 +704,28 @@ class AmigaFuseFS(Operations):
         dir_path = "/" + "/".join(parts[:-1]) if len(parts) > 1 else "/"
         return dir_path, name
 
+    def _check_handler_alive(self):
+        """Check if handler is alive and raise EIO if crashed."""
+        if self.bridge.state.crashed:
+            if self._debug and not getattr(self, '_crash_reported', False):
+                import sys
+                print(f"[FUSE] Handler crashed - all operations returning EIO", file=sys.stderr, flush=True)
+                self._crash_reported = True
+            raise FuseOSError(errno.EIO)
+
+    def _log_op(self, op: str, path: str, extra: str = ""):
+        """Log operation if debug is enabled."""
+        if self._debug:
+            import sys
+            msg = f"[FUSE][{op}] {path}"
+            if extra:
+                msg += f" {extra}"
+            print(msg, file=sys.stderr, flush=True)
+
     # --- FUSE operations ---
     def getattr(self, path, fh=None):
+        # Don't log getattr - too noisy. Only log on errors.
+        self._check_handler_alive()
         # Reject macOS special files immediately without calling handler
         if self._is_macos_special(path):
             self._track_op("getattr", path, cached=True)
@@ -734,6 +766,7 @@ class AmigaFuseFS(Operations):
         return result
 
     def readdir(self, path, fh):
+        self._check_handler_alive()
         # Check directory cache first
         if path in self._dir_cache:
             ts, cached_entries = self._dir_cache[path]
@@ -771,8 +804,8 @@ class AmigaFuseFS(Operations):
         return entries
 
     def open(self, path, flags):
-        if self._debug:
-            print(f"[FUSE][open] path={path} flags=0x{flags:x}")
+        self._log_op("open", path, f"flags=0x{flags:x}")
+        self._check_handler_alive()
         if not self.bridge._write_enabled and (flags & (os.O_WRONLY | os.O_RDWR)):
             raise FuseOSError(errno.EROFS)
         opened = self.bridge.open_file(path, flags)
@@ -791,10 +824,12 @@ class AmigaFuseFS(Operations):
                 "pos": None,
                 "lock": threading.Lock(),
                 "closed": False,
+                "dirty": False,  # Track if file was written to
             }
         return handle
 
     def read(self, path, size, offset, fh):
+        self._check_handler_alive()
         with self._fh_lock:
             entry = self._fh_cache.get(fh)
         if entry is None:
@@ -816,8 +851,8 @@ class AmigaFuseFS(Operations):
             return data
 
     def write(self, path, data, offset, fh):
-        if self._debug:
-            print(f"[FUSE][write] path={path} offset={offset} size={len(data)} fh={fh}")
+        self._log_op("write", path, f"offset={offset} size={len(data)} fh={fh}")
+        self._check_handler_alive()
         if not self.bridge._write_enabled:
             raise FuseOSError(errno.EROFS)
         with self._fh_lock:
@@ -835,9 +870,11 @@ class AmigaFuseFS(Operations):
             if written < 0:
                 raise FuseOSError(errno.EIO)
             entry["pos"] = offset + written
+            entry["dirty"] = True  # Mark as needing flush on close
         return written
 
     def truncate(self, path, length, fh=None):
+        self._check_handler_alive()
         if self._debug:
             print(f"[FUSE][truncate] path={path} length={length} fh={fh}")
         if not self.bridge._write_enabled:
@@ -861,61 +898,80 @@ class AmigaFuseFS(Operations):
                     raise FuseOSError(errno.EIO)
                 if entry["pos"] is not None:
                     entry["pos"] = min(entry["pos"], length)
+                entry["dirty"] = True  # Truncate modifies the file
         finally:
             if temp_handle:
                 self.release(path, fh)
         return 0
 
     def create(self, path, mode, fi=None):
-        if self._debug:
-            print(f"[FUSE][create] path={path} mode=0o{mode:o}")
-        if not self.bridge._write_enabled:
-            raise FuseOSError(errno.EROFS)
-        if self._is_macos_special(path):
-            raise FuseOSError(errno.ENOENT)
-        opened = self.bridge.open_file(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
-        if opened is None:
-            raise FuseOSError(errno.EIO)
-        fh_addr, parent_lock = opened
-        with self._fh_lock:
-            handle = self._next_fh
-            self._next_fh += 1
-            self._fh_cache[handle] = {
-                "fh_addr": fh_addr,
-                "parent_lock": parent_lock,
-                "pos": None,
-                "lock": threading.Lock(),
-                "closed": False,
-            }
-        # Prime stat/dir cache so immediate getattr after create doesn't fail.
-        now = time.time()
-        self._stat_cache[path] = (
-            now,
-            {
-                "st_mode": 0o100644,
-                "st_nlink": 1,
-                "st_size": 0,
-                "st_ctime": int(now),
-                "st_mtime": int(now),
-                "st_atime": int(now),
-                "st_uid": self._uid,
-                "st_gid": self._gid,
-            },
-        )
-        parent_path, _ = self._split_path(path)
-        self._dir_cache.pop(parent_path, None)
-        return handle
+        self._log_op("create", path, f"mode=0o{mode:o}")
+        try:
+            self._check_handler_alive()
+            if not self.bridge._write_enabled:
+                raise FuseOSError(errno.EROFS)
+            if self._is_macos_special(path):
+                raise FuseOSError(errno.ENOENT)
+            opened = self.bridge.open_file(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+            if opened is None:
+                self._log_op("create", path, "FAILED: open_file returned None")
+                raise FuseOSError(errno.EIO)
+            fh_addr, parent_lock = opened
+            with self._fh_lock:
+                handle = self._next_fh
+                self._next_fh += 1
+                self._fh_cache[handle] = {
+                    "fh_addr": fh_addr,
+                    "parent_lock": parent_lock,
+                    "pos": None,
+                    "lock": threading.Lock(),
+                    "closed": False,
+                    "dirty": True,  # New files are always dirty
+                }
+            # Prime stat/dir cache so immediate getattr after create doesn't fail.
+            now = time.time()
+            self._stat_cache[path] = (
+                now,
+                {
+                    "st_mode": 0o100644,
+                    "st_nlink": 1,
+                    "st_size": 0,
+                    "st_ctime": int(now),
+                    "st_mtime": int(now),
+                    "st_atime": int(now),
+                    "st_uid": self._uid,
+                    "st_gid": self._gid,
+                },
+            )
+            parent_path, _ = self._split_path(path)
+            self._dir_cache.pop(parent_path, None)
+            self._log_op("create", path, f"SUCCESS handle={handle} fh_addr=0x{fh_addr:x}")
+            return handle
+        except FuseOSError:
+            raise
+        except Exception as e:
+            self._log_op("create", path, f"EXCEPTION: {type(e).__name__}: {e}")
+            raise FuseOSError(errno.EIO) from e
 
     def unlink(self, path):
+        self._log_op("unlink", path, "")
+        self._check_handler_alive()
         if not self.bridge._write_enabled:
             raise FuseOSError(errno.EROFS)
         dir_path, name = self._split_path(path)
         if not name:
             raise FuseOSError(errno.EINVAL)
         lock_bptr, _, locks = self.bridge.locate_path(dir_path)
-        if lock_bptr == 0 and dir_path != "/":
+        # For root directory, get a proper lock
+        if dir_path == "/" and lock_bptr == 0:
+            lock_bptr, _ = self.bridge.locate(0, "")
+            if lock_bptr:
+                locks.append(lock_bptr)
+        if lock_bptr == 0:
+            self._log_op("unlink", path, f"parent dir not found: {dir_path}")
             raise FuseOSError(errno.ENOENT)
-        res1, _ = self.bridge.delete_object(lock_bptr, name)
+        res1, res2 = self.bridge.delete_object(lock_bptr, name)
+        self._log_op("unlink", path, f"delete_object res1={res1} res2={res2}")
         if res1 == 0:
             raise FuseOSError(errno.EIO)
         self._stat_cache.pop(path, None)
@@ -928,6 +984,7 @@ class AmigaFuseFS(Operations):
         return self.unlink(path)
 
     def mkdir(self, path, mode):
+        self._check_handler_alive()
         if not self.bridge._write_enabled:
             raise FuseOSError(errno.EROFS)
         dir_path, name = self._split_path(path)
@@ -945,6 +1002,7 @@ class AmigaFuseFS(Operations):
         return 0
 
     def rename(self, old, new):
+        self._check_handler_alive()
         if self._debug:
             print(f"[FUSE][rename] old={old} new={new}")
         if not self.bridge._write_enabled:
@@ -971,9 +1029,11 @@ class AmigaFuseFS(Operations):
         return 0
 
     def flush(self, path, fh):
+        self._log_op("flush", path, f"fh={fh}")
         return 0
 
     def fsync(self, path, fdatasync, fh):
+        self._log_op("fsync", path, f"fh={fh} fdatasync={fdatasync}")
         return 0
 
     def chmod(self, path, mode):
@@ -995,6 +1055,7 @@ class AmigaFuseFS(Operations):
         return 0
 
     def access(self, path, mode):
+        self._log_op("access", path, f"mode={mode}")
         if self._is_macos_special(path):
             raise FuseOSError(errno.ENOENT)
         if not self.bridge._write_enabled and (mode & os.W_OK):
@@ -1019,6 +1080,7 @@ class AmigaFuseFS(Operations):
         return 0
 
     def release(self, path, fh):
+        self._log_op("release", path, f"fh={fh}")
         with self._fh_lock:
             entry = self._fh_cache.get(fh)
             if not entry:
@@ -1026,6 +1088,7 @@ class AmigaFuseFS(Operations):
             entry["closed"] = True
             del self._fh_cache[fh]
         with entry["lock"]:
+            self._log_op("release", path, f"closing fh_addr=0x{entry['fh_addr']:x}")
             self.bridge.close_file(entry["fh_addr"])
             parent_lock = entry.get("parent_lock", 0)
             if parent_lock:

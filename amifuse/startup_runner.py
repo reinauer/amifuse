@@ -71,6 +71,9 @@ class HandlerLaunchState:
     main_loop_sp: int = 0   # SP to use when restarting
     initialized: bool = False  # True after startup is complete
     exit_count: int = 0  # Count consecutive exits without WaitPort block
+    crashed: bool = False  # True if handler hit an unrecoverable error
+    last_error_pc: int = 0  # PC at time of crash for diagnostics
+    consecutive_errors: int = 0  # Count of consecutive errors without successful reply
 
 
 class HandlerLauncher:
@@ -275,8 +278,13 @@ class HandlerLauncher:
             entry_stub_pc=stub_pc,
         )
 
-    def run_burst(self, state: HandlerLaunchState, max_cycles=200000):
+    def run_burst(self, state: HandlerLaunchState, max_cycles=200000, debug: bool = False):
         """Run the handler from its current PC/SP for a limited number of cycles."""
+        import sys
+        # If handler has already crashed, don't try to run it
+        if state.crashed:
+            return state.run_state
+
         cpu = self.vh.machine.cpu
         mem = self.vh.alloc.get_mem()
         ram_end = self.vh.machine.get_ram_total()
@@ -285,6 +293,12 @@ class HandlerLauncher:
             # 0x800 is the minimum valid code address; below this is Amiga system
             # vectors, trap handlers, and reserved memory that cannot contain handler code.
             return 0x800 <= pc < ram_end
+
+        # Validate PC before attempting to run - if it's garbage, handler is dead
+        if not _pc_valid(state.pc):
+            state.crashed = True
+            state.last_error_pc = state.pc
+            return state.run_state
 
         # Always restore A6 to ExecBase before entering handler code.
         # We can re-enter the handler after WaitPort/exit traps, and A6 may be 0.
@@ -309,6 +323,27 @@ class HandlerLauncher:
         state.run_state = run_state
         new_pc = cpu.r_pc()
         new_sp = cpu.r_reg(REG_A7) + 4
+
+        # Detect crash: if error occurred and new_pc is garbage, handler is dead
+        if run_state.error and not _pc_valid(new_pc):
+            state.consecutive_errors += 1
+            # After first error, mark as crashed - don't try to recover
+            # The handler's internal state is corrupted and restarting won't help
+            if state.consecutive_errors == 1:
+                # Dump CPU state for debugging
+                d_regs = [cpu.r_reg(i) for i in range(8)]
+                a_regs = [cpu.r_reg(8 + i) for i in range(8)]
+                print(f"\n[amifuse] FATAL: Handler crashed", file=sys.stderr)
+                print(f"[amifuse]   Initial PC=0x{state.pc:x} crashed at PC=0x{new_pc:x}", file=sys.stderr)
+                print(f"[amifuse]   main_loop_pc=0x{state.main_loop_pc:x} entry_stub_pc=0x{state.entry_stub_pc:x}", file=sys.stderr)
+                print(f"[amifuse]   D0-D7: {' '.join(f'{r:08x}' for r in d_regs)}", file=sys.stderr)
+                print(f"[amifuse]   A0-A7: {' '.join(f'{r:08x}' for r in a_regs)}", file=sys.stderr)
+                if a_regs[6] == 0:
+                    print(f"[amifuse]   NOTE: A6 (ExecBase) is NULL - handler lost ExecBase reference", file=sys.stderr)
+                print(f"[amifuse]   Restart amifuse to recover.", file=sys.stderr)
+            state.crashed = True
+            state.last_error_pc = new_pc
+            return run_state
         # Check if WaitPort blocked (saved state in ExecLibrary class variable)
         from amitools.vamos.lib.ExecLibrary import ExecLibrary
         waitport_sp = ExecLibrary._waitport_blocked_sp
@@ -496,7 +531,7 @@ class HandlerLauncher:
         return fh_addr, pkt_addr, msg_addr
 
     def send_findoutput(
-        self, state: HandlerLaunchState, name_bptr: int, dir_lock_bptr: int = 0, fh_addr: int = None
+        self, state: HandlerLaunchState, name_bptr: int, dir_lock_bptr: int = 0, fh_addr: int = None, debug: bool = False
     ):
         """ACTION_FINDOUTPUT: open or create a file for output (truncate)."""
         if fh_addr is None:
