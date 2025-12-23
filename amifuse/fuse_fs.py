@@ -30,7 +30,7 @@ from .vamos_runner import VamosHandlerRuntime
 from .bootstrap import BootstrapAllocator
 from .startup_runner import HandlerLauncher, OFFSET_BEGINNING
 from amitools.vamos.astructs.access import AccessStruct  # type: ignore
-from amitools.vamos.libstructs.dos import FileInfoBlockStruct, FileHandleStruct  # type: ignore
+from amitools.vamos.libstructs.dos import FileInfoBlockStruct, FileHandleStruct, DosPacketStruct  # type: ignore
 
 
 def _parse_fib(mem, fib_addr: int) -> Dict:
@@ -90,11 +90,11 @@ class HandlerBridge:
         self.state = self.launcher.launch_with_startup()
         # run startup to completion
         self._run_until_replies()
-        # Save the current PC/SP as the "main loop" state for later restarts
-        # This is where the handler should be after processing startup
-        self.state.main_loop_pc = self.state.pc
-        self.state.main_loop_sp = self.state.sp
-        self.state.initialized = True
+        self._update_handler_port_from_startup()
+        # Let the handler settle into its message wait loop.
+        self._capture_main_loop_state()
+        if not self.state.initialized:
+            self.state.initialized = True
         if self._debug:
             print(f"[amifuse] Saved main_loop_pc=0x{self.state.pc:x}, main_loop_sp=0x{self.state.sp:x}")
         self.mem = self.vh.alloc.get_mem()
@@ -178,6 +178,37 @@ class HandlerBridge:
                 sleep_time = min(sleep_time * 2, sleep_max)
         return replies
 
+    def _capture_main_loop_state(self, max_iters: int = 10, cycles: int = 200_000):
+        """Run until the handler blocks in Wait/WaitPort and capture restart PC/SP."""
+        from amitools.vamos.lib.ExecLibrary import ExecLibrary
+        for _ in range(max_iters):
+            self.launcher.run_burst(self.state, max_cycles=cycles)
+            if self.state.main_loop_pc:
+                return
+            waitport_sp = ExecLibrary._waitport_blocked_sp
+            wait_sp = ExecLibrary._wait_blocked_sp
+            waitport_ret = ExecLibrary._waitport_blocked_ret
+            wait_ret = ExecLibrary._wait_blocked_ret
+            blocked_sp = waitport_sp if waitport_sp is not None else wait_sp
+            blocked_ret = waitport_ret if waitport_ret is not None else wait_ret
+            if blocked_sp is not None:
+                ret_addr = blocked_ret if blocked_ret is not None else self.mem.r32(blocked_sp)
+                if ret_addr >= 0x800:
+                    self.state.main_loop_pc = ret_addr
+                    self.state.main_loop_sp = blocked_sp + 4
+                return
+
+    def _update_handler_port_from_startup(self):
+        pkt = AccessStruct(self.mem, DosPacketStruct, self.state.stdpkt_addr)
+        res1 = pkt.r_s("dp_Res1")
+        res2 = pkt.r_s("dp_Res2")
+        if res1:
+            alt_port = pkt.r_s("dp_Arg4")
+            if alt_port and alt_port != self.state.port_addr:
+                pmgr = self.vh.slm.exec_impl.port_mgr
+                if not pmgr.has_port(alt_port):
+                    pmgr.register_port(alt_port)
+                self.state.port_addr = alt_port
     def _log_replies(self, label: str, replies):
         if not self._debug:
             return
