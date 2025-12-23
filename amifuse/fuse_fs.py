@@ -81,13 +81,20 @@ class HandlerBridge:
         if trace:
             self.vh.enable_trace()
         self.vh.set_scsi_backend(self.backend)
+        self.mem = self.vh.alloc.get_mem()
         seg_baddr = self.vh.load_handler(driver)
         # Build DeviceNode/FSSM using seglist bptr
         ba = BootstrapAllocator(self.vh, image, partition=partition)
         boot = ba.alloc_all(handler_seglist_baddr=seg_baddr, handler_seglist_bptr=seg_baddr, handler_name="DH0:")
-        entry_addr = self.vh.slm.seg_loader.infos[seg_baddr].seglist.get_segment().get_addr()
-        self.launcher = HandlerLauncher(self.vh, boot, entry_addr)
-        self.state = self.launcher.launch_with_startup()
+        # Handler entry point is at segment start (byte 0).
+        # AmigaOS starts C/assembler handlers at the first byte of the first segment.
+        # The handler's own startup code will set up registers and call WaitPort/GetMsg
+        # to retrieve the startup packet from pr_MsgPort.
+        seg_info = self.vh.slm.seg_loader.infos[seg_baddr]
+        seglist = seg_info.seglist
+        seg_addr = seglist.get_segment().get_addr()
+        self.launcher = HandlerLauncher(self.vh, boot, seg_addr)
+        self.state = self.launcher.launch_with_startup(debug=debug)
         # run startup to completion
         self._run_until_replies()
         self._update_handler_port_from_startup()
@@ -97,7 +104,6 @@ class HandlerBridge:
             self.state.initialized = True
         if self._debug:
             print(f"[amifuse] Saved main_loop_pc=0x{self.state.pc:x}, main_loop_sp=0x{self.state.sp:x}")
-        self.mem = self.vh.alloc.get_mem()
         # cache a best-effort volume name
         self._volname = None
         self._fib_mem = None
@@ -132,21 +138,6 @@ class HandlerBridge:
         if self.state.crashed:
             return []
 
-        # If we previously blocked in WaitPort, reset to the saved return address.
-        waitport_sp = ExecLibrary._waitport_blocked_sp
-        if waitport_sp is not None:
-            try:
-                # Only resume from WaitPort if there is a message pending.
-                has_pending = self.vh.slm.exec_impl.port_mgr.has_msg(self.state.port_addr)
-                if has_pending:
-                    ret_addr = self.mem.r32(waitport_sp)
-                    if ret_addr != 0:
-                        self.state.pc = ret_addr
-                        self.state.sp = waitport_sp + 4
-                        ExecLibrary._waitport_blocked_sp = None
-                        ExecLibrary._waitport_blocked_port = None
-            except Exception:
-                pass
         # Guard against re-entering at the exit trap addresses (0x400/0x402).
         # The emulator uses low memory addresses as trap vectors; if PC lands there,
         # it means the handler tried to exit. Reset to main loop to keep it alive.
@@ -1313,7 +1304,12 @@ def mount_fuse(
         subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     bridge = HandlerBridge(
-        image, driver, block_size=block_size, read_only=not write, debug=debug,
+        image,
+        driver,
+        block_size=block_size,
+        read_only=not write,
+        debug=debug,
+        trace=trace,
         partition=partition
     )
 
