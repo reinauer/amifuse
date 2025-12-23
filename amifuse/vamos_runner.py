@@ -5,11 +5,14 @@ machine, memory map, path manager, scheduler, and lib manager, and loads
 the handler into memory so we can later jump into it.
 """
 
+import logging
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Optional
 
 from amitools.vamos.cfg import VamosMainParser
+from amitools.vamos.log import log_machine, log_setup
 from amitools.vamos.machine import Machine, MemoryMap
 from amitools.vamos.trace import TraceManager
 from amitools.vamos.path import VamosPathManager
@@ -17,6 +20,24 @@ from amitools.vamos.schedule import Scheduler
 from amitools.vamos.libmgr import SetupLibManager
 # local fake scsi.device
 from amifuse.scsi_device import ScsiDevice
+
+_LOG_SETUP_DONE = False
+
+
+def _ensure_vamos_logging(levels):
+    global _LOG_SETUP_DONE
+    if _LOG_SETUP_DONE or log_machine.handlers:
+        _LOG_SETUP_DONE = True
+        return
+    cfg = SimpleNamespace(
+        file=None,
+        timestamps=False,
+        quiet=False,
+        verbose=False,
+        levels=levels,
+    )
+    log_setup(cfg)
+    _LOG_SETUP_DONE = True
 
 
 class VamosHandlerRuntime:
@@ -107,6 +128,13 @@ class VamosHandlerRuntime:
 
     def set_scsi_backend(self, backend):
         self.scsi_backend = backend
+
+    def enable_trace(self, show_regs: bool = False):
+        if not self.machine:
+            return
+        _ensure_vamos_logging({"machine": "info"})
+        log_machine.setLevel(logging.INFO)
+        self.machine.show_instr(show_regs=show_regs)
 
     def load_handler(self, handler_path: Path) -> int:
         if not self.slm:
