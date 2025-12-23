@@ -25,7 +25,7 @@ from amitools.vamos.libstructs.dos import (
     ProcessStruct,
     FileHandleStruct,
 )  # type: ignore
-from amitools.vamos.machine.regs import REG_A0, REG_A6, REG_A7  # type: ignore
+from amitools.vamos.machine.regs import REG_A0, REG_A4, REG_A6, REG_A7, REG_D0  # type: ignore
 from amitools.vamos.schedule.stack import Stack  # type: ignore
 from amitools.vamos.schedule.task import Task  # type: ignore
 from .amiga_structs import DeviceNodeStruct  # type: ignore
@@ -77,7 +77,12 @@ class HandlerLaunchState:
 
 
 class HandlerLauncher:
-    def __init__(self, vh, boot_info: Dict, handler_entry_addr: int):
+    def __init__(
+        self,
+        vh,
+        boot_info: Dict,
+        handler_entry_addr: int,
+    ):
         self.vh = vh
         self.alloc = vh.alloc
         self.mem = vh.alloc.get_mem()
@@ -91,6 +96,22 @@ class HandlerLauncher:
         self._stdpkt_sizes = []
         self._stdpkt_index = 0
         self._stdpkt_ring_size = 8
+        # Cache mp_SigBit offset for signal computation
+        self._mp_sigbit_offset = MsgPortStruct.sdef.find_field_def_by_name("mp_SigBit").offset
+
+    def _compute_pending_signals(self, mask: int = 0xFFFFFFFF) -> int:
+        """Compute pending signals from all message ports, ANDed with mask."""
+        pending = 0
+        port_mgr = self.exec_impl.port_mgr
+        for port_addr, port in port_mgr.ports.items():
+            try:
+                if port.queue is not None and len(port.queue) > 0:
+                    sigbit = self.mem.read(0, port_addr + self._mp_sigbit_offset)
+                    if 0 <= sigbit < 32:
+                        pending |= 1 << sigbit
+            except Exception:
+                continue
+        return pending & mask
 
     # ---- low-level helpers ----
 
@@ -278,12 +299,86 @@ class HandlerLauncher:
             entry_stub_pc=stub_pc,
         )
 
+    def setup_resume_if_blocked(self, state: HandlerLaunchState, debug: bool = False) -> bool:
+        """Check if handler is blocked waiting and set up resume state if message pending.
+
+        This should be called before run_burst to handle the case where a message
+        was queued since the last burst. Returns True if resume was set up.
+        """
+        from amitools.vamos.lib.ExecLibrary import ExecLibrary
+
+        waitport_sp = ExecLibrary._waitport_blocked_sp
+        wait_sp = ExecLibrary._wait_blocked_sp
+        waitport_ret = ExecLibrary._waitport_blocked_ret
+        wait_ret = ExecLibrary._wait_blocked_ret
+        wait_mask = ExecLibrary._wait_blocked_mask
+
+        blocked_sp = waitport_sp if waitport_sp is not None else wait_sp
+        if blocked_sp is None:
+            return False
+
+        # Check if there's a message pending on the relevant port
+        # For WaitPort: check the specific port being waited on
+        # For Wait: check the handler's main port
+        waitport_port = ExecLibrary._waitport_blocked_port
+        if waitport_sp is not None and waitport_port is not None:
+            check_port = waitport_port
+        else:
+            check_port = state.port_addr
+        has_pending = self.exec_impl.port_mgr.has_msg(check_port)
+        if not has_pending:
+            return False
+
+        blocked_ret = waitport_ret if waitport_ret is not None else wait_ret
+        mem = self.vh.alloc.get_mem()
+        cpu = self.vh.machine.cpu
+
+        try:
+            ret_addr = blocked_ret if blocked_ret is not None else mem.r32(blocked_sp)
+        except Exception:
+            ret_addr = 0
+
+        if ret_addr == 0:
+            return False
+
+        # Set up resume state
+        state.pc = ret_addr
+        state.sp = blocked_sp + 4
+
+        # Set D0 appropriately for Wait() or WaitPort()
+        if wait_mask is not None:
+            # Wait() resume - set D0 to ALL pending signals (not masked)
+            # We're resuming because there's a message, so report the message signal
+            # even if handler's mask didn't include it - otherwise handler spins forever
+            pending = self._compute_pending_signals(0xFFFFFFFF)
+            cpu.w_reg(REG_D0, pending)
+        elif waitport_sp is not None:
+            # WaitPort() resume - set D0 to message address
+            waitport_port = ExecLibrary._waitport_blocked_port
+            if waitport_port is not None:
+                msg_addr = self.exec_impl.port_mgr.peek_msg(waitport_port)
+                d0_val = msg_addr if msg_addr else 0
+                cpu.w_reg(REG_D0, d0_val)
+
+        # Clear blocked state
+        ExecLibrary._waitport_blocked_sp = None
+        ExecLibrary._waitport_blocked_port = None
+        ExecLibrary._waitport_blocked_ret = None
+        ExecLibrary._wait_blocked_mask = None
+        ExecLibrary._wait_blocked_sp = None
+        ExecLibrary._wait_blocked_ret = None
+
+        return True
+
     def run_burst(self, state: HandlerLaunchState, max_cycles=200000, debug: bool = False):
         """Run the handler from its current PC/SP for a limited number of cycles."""
         import sys
         # If handler has already crashed, don't try to run it
         if state.crashed:
             return state.run_state
+
+        # Check if we need to resume from a blocked Wait/WaitPort
+        self.setup_resume_if_blocked(state, debug=debug)
 
         cpu = self.vh.machine.cpu
         mem = self.vh.alloc.get_mem()
