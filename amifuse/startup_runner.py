@@ -102,8 +102,29 @@ class HandlerLauncher:
         self._mp_sigbit_offset = MsgPortStruct.sdef.find_field_def_by_name("mp_SigBit").offset
 
     def _compute_pending_signals(self, mask: int = 0xFFFFFFFF) -> int:
-        """Compute pending signals from all message ports, ANDed with mask."""
+        """Compute pending signals from all message ports AND tc_SigRecvd, ANDed with mask.
+
+        Signals can come from two sources:
+        1. Message ports with pending messages (DOS packets)
+        2. tc_SigRecvd - signals set directly by device drivers (IO completion)
+        """
+        from amitools.vamos.libstructs.exec_ import ExecLibraryStruct, TaskStruct
+
         pending = 0
+
+        # First, include any signals already set in tc_SigRecvd (e.g., IO completion)
+        try:
+            exec_base = self.mem.r32(4)
+            if exec_base != 0:
+                this_task_off = ExecLibraryStruct.sdef.find_field_def_by_name("ThisTask").offset
+                this_task = self.mem.r32(exec_base + this_task_off)
+                if this_task != 0:
+                    sigrecvd_off = TaskStruct.sdef.find_field_def_by_name("tc_SigRecvd").offset
+                    pending = self.mem.r32(this_task + sigrecvd_off)
+        except Exception:
+            pass
+
+        # Then add signals from message ports with pending messages
         port_mgr = self.exec_impl.port_mgr
         for port_addr, port in port_mgr.ports.items():
             try:
@@ -114,6 +135,26 @@ class HandlerLauncher:
             except Exception:
                 continue
         return pending & mask
+
+    def _clear_signals_from_task(self, signals: int):
+        """Clear the specified signals from tc_SigRecvd.
+
+        This mimics what Wait() does when it returns - it atomically clears
+        the returned signals from tc_SigRecvd. When we resume from a Wait()
+        block without actually running Wait(), we must clear signals ourselves.
+        """
+        from amitools.vamos.libstructs.exec_ import ExecLibraryStruct, TaskStruct
+        try:
+            exec_base = self.mem.r32(4)
+            if exec_base != 0:
+                this_task_off = ExecLibraryStruct.sdef.find_field_def_by_name("ThisTask").offset
+                this_task = self.mem.r32(exec_base + this_task_off)
+                if this_task != 0:
+                    sigrecvd_off = TaskStruct.sdef.find_field_def_by_name("tc_SigRecvd").offset
+                    current = self.mem.r32(this_task + sigrecvd_off)
+                    self.mem.w32(this_task + sigrecvd_off, current & ~signals)
+        except Exception:
+            pass
 
     # ---- low-level helpers ----
 
@@ -138,11 +179,18 @@ class HandlerLauncher:
                 self.exec_impl._signals[sigbit] = True
         mp.w_s("mp_SigBit", sigbit)
         mp.w_s("mp_SigTask", task_addr)
+        # Initialize mp_MsgList as a proper empty Amiga list
+        # An empty list has: lh_Head -> &lh_Tail, lh_Tail = 0, lh_TailPred -> &lh_Head
         lst_off = MsgPortStruct.sdef.find_field_def_by_name("mp_MsgList").offset
-        lst = AccessStruct(self.mem, ListStruct, port_addr + lst_off)
-        lst.w_s("lh_Head", 0)
-        lst.w_s("lh_Tail", 0)
-        lst.w_s("lh_TailPred", 0)
+        list_addr = port_addr + lst_off
+        lst = AccessStruct(self.mem, ListStruct, list_addr)
+        # Get addresses of list header fields
+        lh_head_addr = list_addr + ListStruct.sdef.find_field_def_by_name("lh_Head").offset
+        lh_tail_addr = list_addr + ListStruct.sdef.find_field_def_by_name("lh_Tail").offset
+        # Empty list: Head points to Tail address, TailPred points to Head address
+        lst.w_s("lh_Head", lh_tail_addr)  # Points to end marker
+        lst.w_s("lh_Tail", 0)             # End marker is 0
+        lst.w_s("lh_TailPred", lh_head_addr)  # Points back to start
         lst.w_s("lh_Type", NodeType.NT_MESSAGE)
         return sigbit
 
@@ -258,9 +306,47 @@ class HandlerLauncher:
             pkt.w_s(f"dp_Arg{i}", val)
         # link message name to packet
         msg.w_s("mn_Node.ln_Name", sp_addr + MessageStruct.get_size())
-        # queue message to destination port
+        # queue message to destination port - both Python queue and Amiga memory
         self.exec_impl.port_mgr.put_msg(dest_port_addr, sp_addr)
+        # Also link the message into the port's mp_MsgList in memory
+        # This is necessary because some handlers (like FFS) read mp_MsgList directly
+        self._link_msg_to_port(dest_port_addr, sp_addr)
         return sp_addr + MessageStruct.get_size(), sp_addr
+
+    def _link_msg_to_port(self, port_addr: int, msg_addr: int):
+        """Link a message into a port's mp_MsgList in Amiga memory.
+
+        This ensures handlers that read mp_MsgList directly (without calling GetMsg)
+        can find the message.
+
+        NOTE: We always reinitialize the list as a single-element list. The vamos
+        GetMsg trap removes from the Python queue but doesn't unlink from the
+        memory list. By always reinitializing, we avoid list corruption from
+        stale entries.
+        """
+        from amitools.vamos.libstructs.exec_ import MsgPortStruct, ListStruct, NodeStruct
+        from amitools.vamos.astructs.access import AccessStruct
+
+        # Get mp_MsgList offset in MsgPort
+        msglist_off = MsgPortStruct.sdef.find_field_def_by_name("mp_MsgList").offset
+        list_addr = port_addr + msglist_off
+
+        lst = AccessStruct(self.mem, ListStruct, list_addr)
+
+        # Get node addresses in list structure
+        lh_head_addr = list_addr + ListStruct.sdef.find_field_def_by_name("lh_Head").offset
+        lh_tail_addr = list_addr + ListStruct.sdef.find_field_def_by_name("lh_Tail").offset
+
+        # Access the message node (mn_Node is at offset 0 of Message)
+        msg_node = AccessStruct(self.mem, NodeStruct, msg_addr)
+
+        # Always reinitialize as single-element list to avoid stale entry issues
+        # lh_Head points to first node, lh_Tail is 0 (end marker), lh_TailPred points to last node
+        lst.w_s("lh_Head", msg_addr)
+        lst.w_s("lh_TailPred", msg_addr)
+        # Message node: ln_Succ points to lh_Tail (end of list), ln_Pred points to lh_Head
+        msg_node.w_s("ln_Succ", lh_tail_addr)
+        msg_node.w_s("ln_Pred", lh_head_addr)
 
     # ---- public orchestration ----
 
@@ -307,10 +393,10 @@ class HandlerLauncher:
         )
 
     def setup_resume_if_blocked(self, state: HandlerLaunchState, debug: bool = False) -> bool:
-        """Check if handler is blocked waiting and set up resume state if message pending.
+        """Check if handler is blocked waiting and set up resume state if signal/message pending.
 
         This should be called before run_burst to handle the case where a message
-        was queued since the last burst. Returns True if resume was set up.
+        was queued or signal was set since the last burst. Returns True if resume was set up.
         """
         from amitools.vamos.lib.ExecLibrary import ExecLibrary
 
@@ -324,15 +410,23 @@ class HandlerLauncher:
         if blocked_sp is None:
             return False
 
-        # Check if there's a message pending on the relevant port
-        # For WaitPort: check the specific port being waited on
-        # For Wait: check the handler's main port
-        waitport_port = ExecLibrary._waitport_blocked_port
-        if waitport_sp is not None and waitport_port is not None:
-            check_port = waitport_port
+        # Check if there's something pending that would wake the handler
+        has_pending = False
+
+        if wait_sp is not None and wait_mask is not None:
+            # Wait() blocked - check if any signals in the mask are pending
+            # This includes both message port signals AND direct signals (like IO completion)
+            pending = self._compute_pending_signals(wait_mask)
+            has_pending = pending != 0
         else:
-            check_port = state.port_addr
-        has_pending = self.exec_impl.port_mgr.has_msg(check_port)
+            # WaitPort blocked - check for message on the specific port
+            waitport_port = ExecLibrary._waitport_blocked_port
+            if waitport_sp is not None and waitport_port is not None:
+                check_port = waitport_port
+            else:
+                check_port = state.port_addr
+            has_pending = self.exec_impl.port_mgr.has_msg(check_port)
+
         if not has_pending:
             return False
 
@@ -359,6 +453,10 @@ class HandlerLauncher:
             # even if handler's mask didn't include it - otherwise handler spins forever
             pending = self._compute_pending_signals(0xFFFFFFFF)
             cpu.w_reg(REG_D0, pending)
+            # CRITICAL: Clear the returned signals from tc_SigRecvd, just like Wait() would.
+            # If we don't clear, the handler's next Wait() call will see the same signals
+            # and return immediately, causing an infinite GetMsg/Wait loop.
+            self._clear_signals_from_task(pending)
         elif waitport_sp is not None:
             # WaitPort() resume - set D0 to message address
             waitport_port = ExecLibrary._waitport_blocked_port
@@ -411,9 +509,14 @@ class HandlerLauncher:
             pass
         if not state.started:
             state.started = True
-        # machine.run always pushes a return address at SP. To avoid growing the
-        # task stack on every burst, reserve space and later undo the push.
-        run_sp = state.sp - 4
+        # machine.run() pushes an exit trap address at SP. When resuming after
+        # Wait/WaitPort, we must NOT offset SP by -4 or the handler's stack will
+        # be corrupted (the handler expects SP to be at state.sp, not state.sp-4).
+        # The exit trap overwrites whatever is at state.sp (typically a saved
+        # register), but this is acceptable since the handler will restore/reuse
+        # that location anyway. The critical thing is that rts pops from the
+        # correct address (state.sp + 4 = the real return address).
+        run_sp = state.sp
         run_state = self.vh.machine.run(
             state.pc,
             sp=run_sp,
@@ -424,7 +527,7 @@ class HandlerLauncher:
         )
         state.run_state = run_state
         new_pc = cpu.r_pc()
-        new_sp = cpu.r_reg(REG_A7) + 4
+        new_sp = cpu.r_reg(REG_A7)
 
         # Detect crash: if error occurred and new_pc is garbage, handler is dead
         if run_state.error and not _pc_valid(new_pc):
@@ -471,7 +574,14 @@ class HandlerLauncher:
                     state.main_loop_pc = ret_addr
                     state.main_loop_sp = blocked_sp + 4
                     state.initialized = True
-                has_pending = self.exec_impl.port_mgr.has_msg(state.port_addr)
+                # Check if there's something pending that would wake the handler
+                if wait_mask is not None:
+                    # Wait() blocked - check for ANY pending signals (messages OR IO completion)
+                    pending = self._compute_pending_signals(wait_mask)
+                    has_pending = pending != 0
+                else:
+                    # WaitPort blocked - check for message on the port
+                    has_pending = self.exec_impl.port_mgr.has_msg(state.port_addr)
                 if has_pending:
                     # Resume from blocking call return address (saved on stack)
                     if _pc_valid(ret_addr):
@@ -488,6 +598,8 @@ class HandlerLauncher:
                         else:
                             pending = self._compute_pending_signals(wait_mask)
                         cpu.w_reg(REG_D0, pending)
+                        # Clear returned signals from tc_SigRecvd (like Wait() would)
+                        self._clear_signals_from_task(pending)
                     elif waitport_sp is not None:
                         # WaitPort() resume - set D0 to message address
                         waitport_port = ExecLibrary._waitport_blocked_port
@@ -524,10 +636,16 @@ class HandlerLauncher:
                     state.main_loop_pc = ret_addr
                     state.main_loop_sp = blocked_sp + 4  # Pop return address
                     state.initialized = True
-                # Only restart immediately if there's a message pending.
+                # Only restart immediately if there's something pending (message or signal).
                 # Otherwise, leave state pointing to Wait/WaitPort return - caller
                 # will queue a message before calling run_burst again.
-                has_pending = self.exec_impl.port_mgr.has_msg(state.port_addr)
+                if wait_mask is not None:
+                    # Wait() blocked - check for ANY pending signals (messages OR IO completion)
+                    pending = self._compute_pending_signals(wait_mask)
+                    has_pending = pending != 0
+                else:
+                    # WaitPort blocked - check for message on the port
+                    has_pending = self.exec_impl.port_mgr.has_msg(state.port_addr)
                 if has_pending:
                     # Restart from return address (where Wait/WaitPort was called)
                     if _pc_valid(ret_addr):
@@ -544,6 +662,8 @@ class HandlerLauncher:
                         else:
                             pending = self._compute_pending_signals(wait_mask)
                         cpu.w_reg(REG_D0, pending)
+                        # Clear returned signals from tc_SigRecvd (like Wait() would)
+                        self._clear_signals_from_task(pending)
                     elif waitport_sp is not None:
                         # WaitPort() resume - set D0 to message address
                         waitport_port = ExecLibrary._waitport_blocked_port
@@ -614,18 +734,25 @@ class HandlerLauncher:
             ],
         )
 
-    def poll_replies(self, port_addr: int):
+    def poll_replies(self, port_addr: int, debug: bool = False):
         """Return a list of (msg_addr, pkt_addr, res1, res2) for all queued replies."""
         results = []
         pmgr = self.exec_impl.port_mgr
-        while pmgr.has_port(port_addr) and pmgr.has_msg(port_addr):
+        has_port = pmgr.has_port(port_addr)
+        has_msg = pmgr.has_msg(port_addr) if has_port else False
+        if debug:
+            print(f"[poll_replies] port=0x{port_addr:x} has_port={has_port} has_msg={has_msg}")
+        while has_port and has_msg:
             msg_addr = pmgr.get_msg(port_addr)
             msg = AccessStruct(self.mem, MessageStruct, msg_addr)
             pkt_addr = msg.r_s("mn_Node.ln_Name")
             pkt = AccessStruct(self.mem, DosPacketStruct, pkt_addr)
             res1 = pkt.r_s("dp_Res1")
             res2 = pkt.r_s("dp_Res2")
+            if debug:
+                print(f"[poll_replies] got msg=0x{msg_addr:x} pkt=0x{pkt_addr:x} res1=0x{res1:x} res2={res2}")
             results.append((msg_addr, pkt_addr, res1, res2))
+            has_msg = pmgr.has_msg(port_addr)
         return results
 
     def send_packet(self, state: HandlerLaunchState, pkt_type: int, args):
