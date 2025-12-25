@@ -80,12 +80,13 @@ class HandlerBridge:
         self.vh.setup(cpu="68020")
         if trace:
             self.vh.enable_trace()
-        self.vh.set_scsi_backend(self.backend)
         self.mem = self.vh.alloc.get_mem()
         seg_baddr = self.vh.load_handler(driver)
         # Build DeviceNode/FSSM using seglist bptr
         ba = BootstrapAllocator(self.vh, image, partition=partition)
         boot = ba.alloc_all(handler_seglist_baddr=seg_baddr, handler_seglist_bptr=seg_baddr, handler_name="DH0:")
+        self.vh.set_scsi_backend(self.backend, debug=debug)
+
         # Handler entry point is at segment start (byte 0).
         # AmigaOS starts C/assembler handlers at the first byte of the first segment.
         # The handler's own startup code will set up registers and call WaitPort/GetMsg

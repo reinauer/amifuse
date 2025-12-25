@@ -120,14 +120,16 @@ class VamosHandlerRuntime:
         # register fake scsi.device backed by backend placeholder
         # actual backend will be set by caller via set_scsi_backend()
         self.scsi_backend = None
-        self.slm.lib_mgr.add_impl_cls("scsi.device", lambda: ScsiDevice(self.scsi_backend))
+        self.scsi_debug = False
+        self.slm.lib_mgr.add_impl_cls("scsi.device", lambda: ScsiDevice(self.scsi_backend, self.scsi_debug))
         from amifuse.null_device import NullDevice  # lazy import to avoid cycles
         self.slm.lib_mgr.add_impl_cls("keyboard.device", NullDevice)
         self.slm.lib_mgr.add_impl_cls("timer.device", NullDevice)
         self.slm.lib_mgr.add_impl_cls("console.device", NullDevice)
 
-    def set_scsi_backend(self, backend):
+    def set_scsi_backend(self, backend, debug=False):
         self.scsi_backend = backend
+        self.scsi_debug = debug
 
     def enable_trace(self, show_regs: bool = False):
         if not self.machine:

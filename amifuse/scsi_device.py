@@ -14,7 +14,7 @@ from amitools.vamos.libstructs.exec_ import IORequestStruct, UnitStruct  # type:
 
 CMD_READ = 2  # TD_READ
 CMD_WRITE = 3  # TD_WRITE
-TD_GETGEOMETRY = 18
+TD_GETGEOMETRY = 22
 # HD_SCSICMD = 28
 
 
@@ -37,9 +37,10 @@ class SCSICmdStruct(AmigaStruct):
 
 
 class ScsiDevice(LibImpl):
-    def __init__(self, backend):
+    def __init__(self, backend, debug=False):
         super().__init__()
         self.backend = backend
+        self.debug = debug
 
     def get_version(self):
         return 40
@@ -61,6 +62,14 @@ class ScsiDevice(LibImpl):
         offset = ior.r_s("io_Offset")
         buf_ptr = ior.r_s("io_Data")
         # SCSI command dispatch
+        cmd_names = {
+            2: "CMD_READ", 3: "CMD_WRITE", 9: "TD_MOTOR", 11: "TD_FORMAT",
+            14: "TD_CHANGESTATE", 15: "TD_PROTSTATUS", 18: "TD_GETDRIVETYPE",
+            22: "TD_GETGEOMETRY", 28: "HD_SCSICMD",
+        }
+        if self.debug:
+            cmd_name = cmd_names.get(cmd, f"CMD_{cmd}")
+            print(f"[SCSI] {cmd_name} offset={offset} len={length} buf=0x{buf_ptr:08x}")
 
         # Clear error
         ior.w_s("io_Error", 0)
@@ -163,6 +172,21 @@ class ScsiDevice(LibImpl):
             mem.w8(geo_ptr + 16, 0)  # DeviceType
             mem.w8(geo_ptr + 17, 0)  # Flags
             mem.w16(geo_ptr + 18, 0)  # Reserved
+            ior.w_s("io_Actual", 0)
+        elif cmd == 9:  # TD_MOTOR
+            # Turn motor on/off, return old motor state (always 0 for us)
+            ior.w_s("io_Actual", 0)
+        elif cmd == 11:  # TD_FORMAT
+            # Format tracks - no-op for existing disk images
+            ior.w_s("io_Actual", length)
+        elif cmd == 14:  # TD_CHANGESTATE
+            # Check if disk is present: io_Actual=0 means disk present
+            ior.w_s("io_Actual", 0)
+        elif cmd == 15:  # TD_PROTSTATUS
+            # Check write protect: io_Actual=0 means not protected
+            ior.w_s("io_Actual", 0 if not self.backend.read_only else 1)
+        elif cmd == 18:  # TD_GETDRIVETYPE
+            # Return drive type: 0 = 3.5" drive
             ior.w_s("io_Actual", 0)
         else:
             # For unhandled commands (e.g., TD_ADDCHANGEINT), report success.
