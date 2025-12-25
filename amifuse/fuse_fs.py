@@ -168,6 +168,22 @@ class HandlerBridge:
         self.state = self.launcher.launch_with_startup(debug=debug)
         # run startup to completion
         self._run_until_replies()
+        # Check if startup succeeded - res1=0 means the handler rejected the disk
+        pkt = AccessStruct(self.mem, DosPacketStruct, self.state.stdpkt_addr)
+        startup_res1 = pkt.r_s("dp_Res1")
+        startup_res2 = pkt.r_s("dp_Res2")
+        if debug:
+            print(f"[amifuse] Startup packet result: res1={startup_res1} res2={startup_res2}")
+        if startup_res1 == 0:
+            # Handler rejected the disk - likely invalid filesystem signature
+            error_msgs = {
+                218: "Not a valid DOS disk (NDOS)",
+                225: "Not a DOS disk",
+                226: "Wrong disk type",
+                303: "Object not found",
+            }
+            error_desc = error_msgs.get(startup_res2, f"error code {startup_res2}")
+            raise SystemExit(f"Filesystem handler rejected the disk: {error_desc}")
         self._update_handler_port_from_startup()
         # Let the handler settle into its message wait loop.
         self._capture_main_loop_state()
@@ -207,6 +223,8 @@ class HandlerBridge:
 
         # Check if handler has crashed - if so, don't try to run it
         if self.state.crashed:
+            if self._debug:
+                print("[amifuse] _run_until_replies: handler crashed, returning empty")
             return []
 
         # Guard against re-entering at the exit trap addresses (0x400/0x402).
@@ -215,15 +233,67 @@ class HandlerBridge:
         if self.state.pc <= 0x1000 and getattr(self.state, "main_loop_pc", 0):
             self.state.pc = self.state.main_loop_pc
             self.state.sp = self.state.main_loop_sp
+
+        # If handler is at main_loop_pc and there's a pending message, set D0 to wake it
+        # This handles the case where handler is blocked waiting but blocked state was cleared
+        if self.state.main_loop_pc and self.state.pc == self.state.main_loop_pc:
+            pmgr = self.vh.slm.exec_impl.port_mgr
+            has_msg = pmgr.has_msg(self.state.port_addr)
+            if self._debug:
+                # Show all ports and their queue status, including sigbit and memory list head
+                from amitools.vamos.libstructs.exec_ import MsgPortStruct, ListStruct
+                port_status = []
+                for addr, port in pmgr.ports.items():
+                    qlen = len(port.queue) if port.queue else 0
+                    # Read mp_SigBit from memory (offset 15 in MsgPort)
+                    try:
+                        sigbit = self.mem.r8(addr + 15)  # mp_SigBit offset
+                        # Read mp_MsgList.lh_Head to see if message is in memory
+                        lst_off = MsgPortStruct.sdef.find_field_def_by_name("mp_MsgList").offset
+                        lh_head = self.mem.r32(addr + lst_off)
+                        lh_tail_addr = addr + lst_off + ListStruct.sdef.find_field_def_by_name("lh_Tail").offset
+                        # If lh_Head == lh_Tail address, list is empty
+                        list_empty = (lh_head == lh_tail_addr or lh_head == 0)
+                    except:
+                        sigbit = -1
+                        lh_head = 0
+                        list_empty = True
+                    list_str = "empty" if list_empty else f"msg@0x{lh_head:x}"
+                    port_status.append(f"0x{addr:x}:py{qlen}/sig{sigbit}/{list_str}")
+                print(f"[amifuse] Ports: {' '.join(port_status)}")
+            if has_msg:
+                # Set D0 to signal that message is available
+                # FFS uses Wait() with signal mask, so D0 must have the signal bit set
+                # We use signal bit 8 (0x100) which matches mp_SigBit in _create_process
+                self.vh.machine.cpu.w_reg(0, 0x100)  # REG_D0 = signal bit 8
+                # Also set tc_SigRecvd in case handler checks the task structure
+                # Process structure starts with Task, so tc_SigRecvd is at same offset
+                from amitools.vamos.libstructs.exec_ import TaskStruct
+                sigrecvd_off = TaskStruct.sdef.find_field_def_by_name("tc_SigRecvd").offset
+                proc_addr = self.state.process_addr
+                self.mem.w32(proc_addr + sigrecvd_off, 0x100)
+                if self._debug:
+                    print(f"[amifuse] Resuming: D0=0x100 tc_SigRecvd@0x{proc_addr + sigrecvd_off:x}=0x100")
+
         for i in range(max_iters):
+            old_pc = self.state.pc
             self.launcher.run_burst(self.state, max_cycles=cycles)
             rs = self.state.run_state
+            new_pc = self.state.pc
+            # Log first few iterations to debug handler movement
+            if self._debug and i < 3:
+                cycles_run = getattr(rs, 'cycles', 0) if rs else 0
+                print(f"[amifuse] iter {i}: PC 0x{old_pc:x}->0x{new_pc:x} cycles={cycles_run} done={getattr(rs, 'done', False)} error={getattr(rs, 'error', None)}")
             # Check if handler crashed during this burst
             if self.state.crashed:
+                if self._debug:
+                    print(f"[amifuse] _run_until_replies: handler crashed at iter {i}")
                 return []
             # Check for replies first - if we have them, we're done
-            replies = self.launcher.poll_replies(self.state.reply_port_addr)
+            replies = self.launcher.poll_replies(self.state.reply_port_addr, debug=self._debug)
             if replies:
+                if self._debug and i > 5:
+                    print(f"[amifuse] _run_until_replies: got {len(replies)} replies after {i} iters")
                 break
             # If handler is blocked in WaitPort/Wait with no messages, stop spinning
             if ExecLibrary._waitport_blocked_sp is not None or ExecLibrary._wait_blocked_sp is not None:
@@ -232,12 +302,14 @@ class HandlerBridge:
                 break
             if getattr(rs, "error", None):
                 # Error during run - might be WaitPort block, check if we have replies
-                replies = self.launcher.poll_replies(self.state.reply_port_addr)
+                replies = self.launcher.poll_replies(self.state.reply_port_addr, debug=self._debug)
                 break
             # Yield with exponential backoff to avoid tight polling loops.
             if sleep_base > 0:
                 time.sleep(sleep_time)
                 sleep_time = min(sleep_time * 2, sleep_max)
+        if self._debug and not replies:
+            print(f"[amifuse] _run_until_replies: exhausted {max_iters} iters with no replies, pc=0x{self.state.pc:x}")
         return replies
 
     def _capture_main_loop_state(self, max_iters: int = 10, cycles: int = 200_000):
@@ -265,12 +337,24 @@ class HandlerBridge:
         res1 = pkt.r_s("dp_Res1")
         res2 = pkt.r_s("dp_Res2")
         if res1:
+            # Check dp_Port - many handlers set this to their message port in the reply
+            dp_port = pkt.r_s("dp_Port")
             alt_port = pkt.r_s("dp_Arg4")
-            if alt_port and alt_port != self.state.port_addr:
+            if self._debug:
+                print(f"[amifuse] Startup reply: dp_Port=0x{dp_port:x} dp_Arg4=0x{alt_port:x} (current=0x{self.state.port_addr:x})")
+            # Prefer dp_Port if it's different and valid
+            new_port = None
+            if dp_port and dp_port != self.state.reply_port_addr and dp_port != self.state.port_addr:
+                new_port = dp_port
+            elif alt_port and alt_port != self.state.port_addr:
+                new_port = alt_port
+            if new_port:
                 pmgr = self.vh.slm.exec_impl.port_mgr
-                if not pmgr.has_port(alt_port):
-                    pmgr.register_port(alt_port)
-                self.state.port_addr = alt_port
+                if not pmgr.has_port(new_port):
+                    pmgr.register_port(new_port)
+                if self._debug:
+                    print(f"[amifuse] Switching to handler port 0x{new_port:x}")
+                self.state.port_addr = new_port
     def _log_replies(self, label: str, replies):
         if not self._debug:
             return
@@ -345,6 +429,11 @@ class HandlerBridge:
             _, name_bptr = self._alloc_bstr(name)
             self.launcher.send_locate(self.state, lock_bptr, name_bptr)
             replies = self._run_until_replies()
+            if self._debug:
+                if replies:
+                    print(f"[amifuse] locate(lock=0x{lock_bptr:x}, name='{name}'): res1=0x{replies[-1][2]:x} res2={replies[-1][3]}")
+                else:
+                    print(f"[amifuse] locate(lock=0x{lock_bptr:x}, name='{name}'): NO REPLIES")
             return replies[-1][2] if replies else 0, replies[-1][3] if replies else -1
 
     def free_lock(self, lock_bptr: int):
@@ -440,15 +529,23 @@ class HandlerBridge:
             if lock_bptr == 0:
                 root_lock, _ = self.locate(0, "")
                 lock_bptr = root_lock
+                if self._debug:
+                    print(f"[amifuse] list_dir: obtained root_lock=0x{root_lock:x}")
             fib_mem = self._alloc_fib()
             # First Examine returns info about the directory itself, not contents
             self.launcher.send_examine(self.state, lock_bptr, fib_mem.addr)
             replies = self._run_until_replies()
             entries: List[Dict] = []
             if not replies or replies[-1][2] == 0:
+                if self._debug:
+                    res2 = replies[-1][3] if replies else -1
+                    print(f"[amifuse] list_dir: Examine FAILED lock=0x{lock_bptr:x} res2={res2}")
                 if root_lock:
                     self.free_lock(root_lock)
                 return entries
+            if self._debug:
+                dir_info = _parse_fib(self.mem, fib_mem.addr)
+                print(f"[amifuse] list_dir: Examine OK dir_name='{dir_info['name']}' type={dir_info['dir_type']}")
             # Don't add the first entry - it's the directory itself, not a child
             # Iterate via ExamineNext to get actual directory contents
             for _ in range(256):
