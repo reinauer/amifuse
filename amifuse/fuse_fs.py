@@ -119,7 +119,10 @@ class HandlerBridge:
         self.launcher = HandlerLauncher(self.vh, boot, seg_addr)
         self.state = self.launcher.launch_with_startup(debug=debug)
         # run startup to completion
-        self._run_until_replies()
+        # Use higher cycle count for startup to avoid burst boundary issues.
+        # When a burst ends mid-execution, machine.run() writes exit trap 0x400
+        # to (SP), which can corrupt return addresses on the stack.
+        self._run_until_replies(cycles=2_000_000)
         # Check if startup succeeded - res1=0 means the handler rejected the disk
         pkt = AccessStruct(self.mem, DosPacketStruct, self.state.stdpkt_addr)
         startup_res1 = pkt.r_s("dp_Res1")
