@@ -98,9 +98,11 @@ class HandlerBridge:
             num_cyl = end_cyl - start_cyl + 1
             start_blk = start_cyl * blk_per_cyl
             num_blk = num_cyl * blk_per_cyl
-            print(f"[amifuse] Partition geometry:")
-            print(f"[amifuse]   DosEnvec: LowCyl={start_cyl} HighCyl={end_cyl} Surfaces={dos_env.surfaces} BlkPerTrack={dos_env.blk_per_trk}")
-            print(f"[amifuse]   Calculated: blk_per_cyl={blk_per_cyl} start_blk={start_blk} num_blk={num_blk}")
+
+            if debug:
+                print(f"[amifuse] Partition geometry:")
+                print(f"[amifuse]   DosEnvec: LowCyl={start_cyl} HighCyl={end_cyl} Surfaces={dos_env.surfaces} BlkPerTrack={dos_env.blk_per_trk}")
+                print(f"[amifuse]   Calculated: blk_per_cyl={blk_per_cyl} start_blk={start_blk} num_blk={num_blk}")
 
         self.vh.set_scsi_backend(self.backend, debug=debug)
 
@@ -111,6 +113,9 @@ class HandlerBridge:
         seg_info = self.vh.slm.seg_loader.infos[seg_baddr]
         seglist = seg_info.seglist
         seg_addr = seglist.get_segment().get_addr()
+        seg_size = seglist.get_segment().get_size()
+        if debug:
+            print(f"[amifuse] Segment: addr=0x{seg_addr:x} size={seg_size} end=0x{seg_addr+seg_size:x}")
         self.launcher = HandlerLauncher(self.vh, boot, seg_addr)
         self.state = self.launcher.launch_with_startup(debug=debug)
         # run startup to completion
