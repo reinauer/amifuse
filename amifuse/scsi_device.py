@@ -221,24 +221,32 @@ class ScsiDevice(LibImpl):
             self.backend.write_blocks(block_num, data, length // self.backend.block_size)
             ior.w_s("io_Actual", length)
         elif cmd == TD_GETGEOMETRY:
-            # Geometry layout matches Amiga DriveGeometry:
-            # UWORD dg_SectorSize, ULONG dg_TotalSectors, UWORD dg_Cylinders,
-            # UWORD dg_CylSects, UWORD dg_Heads, UWORD dg_TrackSects,
-            # UWORD dg_BufMemType, UBYTE dg_DeviceType, UBYTE dg_Flags, UWORD dg_Reserved
+            # DriveGeometry structure from devices/trackdisk.h:
+            # All main fields are ULONGs (4 bytes each)!
+            #   ULONG dg_SectorSize;    /* 0: bytes per sector */
+            #   ULONG dg_TotalSectors;  /* 4: total sectors on drive */
+            #   ULONG dg_Cylinders;     /* 8: number of cylinders */
+            #   ULONG dg_CylSectors;    /* 12: sectors per cylinder */
+            #   ULONG dg_Heads;         /* 16: number of heads/surfaces */
+            #   ULONG dg_TrackSectors;  /* 20: sectors per track */
+            #   ULONG dg_BufMemType;    /* 24: type of memory for buffers */
+            #   UBYTE dg_DeviceType;    /* 28: device type */
+            #   UBYTE dg_Flags;         /* 29: flags */
+            #   UWORD dg_Reserved;      /* 30: reserved */
             geo_ptr = buf_ptr
             total_secs = self.backend.total_blocks
             cyls = self.backend.cyls
             cyl_secs = self.backend.secs * self.backend.heads
-            mem.w16(geo_ptr + 0, self.backend.block_size)
-            mem.w32(geo_ptr + 2, total_secs)
-            mem.w16(geo_ptr + 6, cyls)
-            mem.w16(geo_ptr + 8, cyl_secs)
-            mem.w16(geo_ptr + 10, self.backend.heads)
-            mem.w16(geo_ptr + 12, self.backend.secs)
-            mem.w16(geo_ptr + 14, 1)  # BufMemType
-            mem.w8(geo_ptr + 16, 0)  # DeviceType
-            mem.w8(geo_ptr + 17, 0)  # Flags
-            mem.w16(geo_ptr + 18, 0)  # Reserved
+            mem.w32(geo_ptr + 0, self.backend.block_size)   # dg_SectorSize
+            mem.w32(geo_ptr + 4, total_secs)                # dg_TotalSectors
+            mem.w32(geo_ptr + 8, cyls)                      # dg_Cylinders
+            mem.w32(geo_ptr + 12, cyl_secs)                 # dg_CylSectors
+            mem.w32(geo_ptr + 16, self.backend.heads)       # dg_Heads
+            mem.w32(geo_ptr + 20, self.backend.secs)        # dg_TrackSectors
+            mem.w32(geo_ptr + 24, 1)                        # dg_BufMemType (MEMF_PUBLIC)
+            mem.w8(geo_ptr + 28, 0)                         # dg_DeviceType
+            mem.w8(geo_ptr + 29, 0)                         # dg_Flags
+            mem.w16(geo_ptr + 30, 0)                        # dg_Reserved
             ior.w_s("io_Actual", 0)
         elif cmd == 9:  # TD_MOTOR
             # Turn motor on/off, return old motor state (always 0 for us)
