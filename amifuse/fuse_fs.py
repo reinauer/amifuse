@@ -31,6 +31,7 @@ from .bootstrap import BootstrapAllocator
 from .startup_runner import HandlerLauncher, OFFSET_BEGINNING
 from amitools.vamos.astructs.access import AccessStruct  # type: ignore
 from amitools.vamos.libstructs.dos import FileInfoBlockStruct, FileHandleStruct, DosPacketStruct  # type: ignore
+from amitools.vamos.lib.dos.DosProtection import DosProtection  # type: ignore
 
 
 def _parse_fib(mem, fib_addr: int) -> Dict:
@@ -45,6 +46,7 @@ def _parse_fib(mem, fib_addr: int) -> Dict:
       fib_Size: ULONG at 124
     """
     dir_type = mem.r32s(fib_addr + 4)   # fib_DirEntryType (signed LONG)
+    protection = mem.r32(fib_addr + 116)  # fib_Protection (LONG)
     size = mem.r32(fib_addr + 124)      # fib_Size (unsigned ULONG)
     name_bytes = mem.r_block(fib_addr + 8, 108)  # fib_FileName starts at offset 8
     name_len = name_bytes[0]
@@ -53,6 +55,7 @@ def _parse_fib(mem, fib_addr: int) -> Dict:
         "dir_type": dir_type,
         "size": size,
         "name": name,
+        "protection": protection,
     }
 
 
@@ -540,7 +543,7 @@ class HandlerBridge:
             if lock == 0 and path != "/":
                 return None
             if path == "/":
-                return {"dir_type": 2, "size": 0, "name": ""}
+                return {"dir_type": 2, "size": 0, "name": "", "protection": 0}
             fib_mem = self._alloc_fib()
             self.launcher.send_examine(self.state, lock, fib_mem.addr)
             replies = self._run_until_replies()
@@ -924,8 +927,13 @@ class AmigaFuseFS(Operations):
             self._set_neg_cached(path)
             raise FuseOSError(errno.ENOENT)
         is_dir = info["dir_type"] >= 0
-        file_mode = 0o644 if self.bridge._write_enabled else 0o444
-        mode = (0o755 if is_dir else file_mode) | (0o040000 if is_dir else 0o100000)
+        # Convert Amiga protection bits to Unix mode
+        prot = DosProtection(info.get("protection", 0))
+        base_mode = prot.to_host_mode()
+        # For read-only mounts, strip write bits
+        if not self.bridge._write_enabled:
+            base_mode &= ~(0o222)
+        mode = base_mode | (0o040000 if is_dir else 0o100000)
         now = int(time.time())
         result = {
             "st_mode": mode,
@@ -960,8 +968,13 @@ class AmigaFuseFS(Operations):
             # Pre-populate stat cache from directory listing
             child_path = path.rstrip("/") + "/" + name if path != "/" else "/" + name
             is_dir = ent["dir_type"] >= 0
-            file_mode = 0o644 if self.bridge._write_enabled else 0o444
-            mode = (0o755 if is_dir else file_mode) | (0o040000 if is_dir else 0o100000)
+            # Convert Amiga protection bits to Unix mode
+            prot = DosProtection(ent.get("protection", 0))
+            base_mode = prot.to_host_mode()
+            # For read-only mounts, strip write bits
+            if not self.bridge._write_enabled:
+                base_mode &= ~(0o222)
+            mode = base_mode | (0o040000 if is_dir else 0o100000)
             stat_result = {
                 "st_mode": mode,
                 "st_nlink": 2 if is_dir else 1,
