@@ -19,7 +19,6 @@ from amitools.vamos.libstructs.exec_ import (  # type: ignore
     TaskState,
 )
 from amitools.vamos.libstructs.dos import (
-    CLIStruct,
     DosPacketStruct,
     MessageStruct,
     ProcessStruct,
@@ -30,6 +29,7 @@ from amitools.vamos.schedule.stack import Stack  # type: ignore
 from amitools.vamos.schedule.task import Task  # type: ignore
 from .amiga_structs import DeviceNodeStruct  # type: ignore
 from amitools.vamos.libstructs.exec_ import NodeStruct  # type: ignore
+from amitools.vamos.lib.DosLibrary import DosLibrary  # type: ignore
 from .handler_stub import build_entry_stub  # type: ignore
 
 # Dos packet opcodes we care about
@@ -233,17 +233,8 @@ class HandlerLauncher:
         proc.w_s("pr_StackSize", stack.get_size())
         proc.w_s("pr_StackBase", stack.get_lower())
         proc.w_s("pr_GlobVec", 0xFFFFFFFF)
-        # Minimal CLI to placate handlers expecting a CLI/process context
-        cli_mem = self.alloc.alloc_memory(CLIStruct.get_size(), label="HandlerCLI")
-        self.mem.w_block(cli_mem.addr, b"\x00" * CLIStruct.get_size())
-        cli = AccessStruct(self.mem, CLIStruct, cli_mem.addr)
-        cmd_name_bstr = self._write_bstr(name, "CLICommandName")
-        prompt_bstr = self._write_bstr("", "CLIPrompt")
-        cli.w_s("cli_CommandName", cmd_name_bstr >> 2)
-        cli.w_s("cli_SetName", cmd_name_bstr >> 2)
-        cli.w_s("cli_Prompt", prompt_bstr >> 2)
-        cli.w_s("cli_DefaultStack", stack.get_size() >> 2)
-        proc.w_s("pr_CLI", cli_mem.addr >> 2)
+        # NOTE: Do NOT set pr_CLI - SFS checks this to distinguish handler vs CLI
+        # invocation, and rejects startup if pr_CLI is set.
         # dummy file handles for stdio
         fh_in_mem = self.alloc.alloc_struct(FileHandleStruct, label="NullFHIn")
         fh_out_mem = self.alloc.alloc_struct(FileHandleStruct, label="NullFHOut")
@@ -458,11 +449,18 @@ class HandlerLauncher:
             # and return immediately, causing an infinite GetMsg/Wait loop.
             self._clear_signals_from_task(pending)
         elif waitport_sp is not None:
-            # WaitPort() resume - set D0 to message address
+            # WaitPort()/WaitPkt() resume - set D0 appropriately
             waitport_port = ExecLibrary._waitport_blocked_port
             if waitport_port is not None:
                 msg_addr = self.exec_impl.port_mgr.peek_msg(waitport_port)
-                d0_val = msg_addr if msg_addr else 0
+                if DosLibrary._waitpkt_blocked and msg_addr:
+                    # WaitPkt() resume - extract packet from message
+                    msg = AccessStruct(self.mem, MessageStruct, msg_addr)
+                    pkt_addr = msg.r_s("mn_Node.ln_Name")
+                    d0_val = pkt_addr if pkt_addr else 0
+                else:
+                    # WaitPort() resume - return message address
+                    d0_val = msg_addr if msg_addr else 0
                 cpu.w_reg(REG_D0, d0_val)
 
         # Clear blocked state
@@ -472,6 +470,7 @@ class HandlerLauncher:
         ExecLibrary._wait_blocked_mask = None
         ExecLibrary._wait_blocked_sp = None
         ExecLibrary._wait_blocked_ret = None
+        DosLibrary._waitpkt_blocked = False
 
         return True
 
@@ -601,11 +600,18 @@ class HandlerLauncher:
                         # Clear returned signals from tc_SigRecvd (like Wait() would)
                         self._clear_signals_from_task(pending)
                     elif waitport_sp is not None:
-                        # WaitPort() resume - set D0 to message address
+                        # WaitPort()/WaitPkt() resume - set D0 appropriately
                         waitport_port = ExecLibrary._waitport_blocked_port
                         if waitport_port is not None:
                             msg_addr = self.exec_impl.port_mgr.peek_msg(waitport_port)
-                            cpu.w_reg(REG_D0, msg_addr if msg_addr else 0)
+                            if DosLibrary._waitpkt_blocked and msg_addr:
+                                # WaitPkt() resume - extract packet from message
+                                msg = AccessStruct(self.mem, MessageStruct, msg_addr)
+                                pkt_addr = msg.r_s("mn_Node.ln_Name")
+                                cpu.w_reg(REG_D0, pkt_addr if pkt_addr else 0)
+                            else:
+                                # WaitPort() resume - return message address
+                                cpu.w_reg(REG_D0, msg_addr if msg_addr else 0)
                     # Clear both blocking states
                     ExecLibrary._waitport_blocked_port = None
                     ExecLibrary._waitport_blocked_sp = None
@@ -613,6 +619,7 @@ class HandlerLauncher:
                     ExecLibrary._wait_blocked_mask = None
                     ExecLibrary._wait_blocked_sp = None
                     ExecLibrary._wait_blocked_ret = None
+                    DosLibrary._waitpkt_blocked = False
                 else:
                     # No message pending - save restart point for later
                     if _pc_valid(ret_addr):
@@ -665,11 +672,18 @@ class HandlerLauncher:
                         # Clear returned signals from tc_SigRecvd (like Wait() would)
                         self._clear_signals_from_task(pending)
                     elif waitport_sp is not None:
-                        # WaitPort() resume - set D0 to message address
+                        # WaitPort()/WaitPkt() resume - set D0 appropriately
                         waitport_port = ExecLibrary._waitport_blocked_port
                         if waitport_port is not None:
                             msg_addr = self.exec_impl.port_mgr.peek_msg(waitport_port)
-                            cpu.w_reg(REG_D0, msg_addr if msg_addr else 0)
+                            if DosLibrary._waitpkt_blocked and msg_addr:
+                                # WaitPkt() resume - extract packet from message
+                                msg = AccessStruct(self.mem, MessageStruct, msg_addr)
+                                pkt_addr = msg.r_s("mn_Node.ln_Name")
+                                cpu.w_reg(REG_D0, pkt_addr if pkt_addr else 0)
+                            else:
+                                # WaitPort() resume - return message address
+                                cpu.w_reg(REG_D0, msg_addr if msg_addr else 0)
                     # Clear the blocked states
                     ExecLibrary._waitport_blocked_port = None
                     ExecLibrary._waitport_blocked_sp = None
@@ -677,6 +691,7 @@ class HandlerLauncher:
                     ExecLibrary._wait_blocked_mask = None
                     ExecLibrary._wait_blocked_sp = None
                     ExecLibrary._wait_blocked_ret = None
+                    DosLibrary._waitpkt_blocked = False
                     state.exit_count = 0  # Reset exit counter
                 else:
                     # No message pending - save restart point but don't spin.
