@@ -56,47 +56,6 @@ def _parse_fib(mem, fib_addr: int) -> Dict:
     }
 
 
-class OffsetBlockDeviceBackend:
-    """Wraps a BlockDeviceBackend to present a partition as a logical device starting at block 0."""
-
-    def __init__(self, backend, start_block: int, num_blocks: int):
-        self.backend = backend
-        self.start_block = start_block
-        self.num_blocks = num_blocks
-        self.block_size = backend.block_size
-        self.read_only = backend.read_only
-        # Forward RDB for volume name lookup
-        self.rdb = getattr(backend, 'rdb', None)
-        # Geometry
-        self.heads = backend.heads
-        self.secs = backend.secs
-        # Calculate logical cylinders
-        blk_per_cyl = self.heads * self.secs
-        self.cyls = num_blocks // blk_per_cyl if blk_per_cyl else 0
-        self.total_blocks = num_blocks
-
-    def close(self):
-        self.backend.close()
-
-    def read_blocks(self, blk_num: int, num_blks: int = 1) -> bytes:
-        if blk_num + num_blks > self.total_blocks:
-            num_blks = max(0, self.total_blocks - blk_num)
-            if num_blks == 0:
-                return b''
-        return self.backend.read_blocks(self.start_block + blk_num, num_blks)
-
-    def write_blocks(self, blk_num: int, data: bytes, num_blks: int = 1):
-        if blk_num + num_blks > self.total_blocks:
-            num_blks = max(0, self.total_blocks - blk_num)
-            if num_blks == 0:
-                return
-            data = data[:num_blks * self.block_size]
-        self.backend.write_blocks(self.start_block + blk_num, data, num_blks)
-
-    def sync(self):
-        self.backend.sync()
-
-
 import threading
 
 class HandlerBridge:
@@ -128,32 +87,20 @@ class HandlerBridge:
         boot = ba.alloc_all(handler_seglist_baddr=seg_baddr, handler_seglist_bptr=seg_baddr, handler_name="DH0:")
         self._partition_index = boot["part"].num if boot.get("part") else 0
 
-        # For FFS compatibility: wrap backend to present partition starting at block 0,
-        # and patch DosEnvec to set LowCyl=0, Surfaces=0 (triggers FFS auto-detect).
-        if boot.get("part") and boot.get("env_addr"):
+        # Log partition geometry for debugging.
+        if boot.get("part") and debug:
             part = boot["part"]
-            blk_per_cyl = self.backend.heads * self.backend.secs
             dos_env = part.part_blk.dos_env
+            # Use partition geometry from DosEnvec, not disk geometry
+            blk_per_cyl = dos_env.surfaces * dos_env.blk_per_trk
             start_cyl = dos_env.low_cyl
             end_cyl = dos_env.high_cyl
             num_cyl = end_cyl - start_cyl + 1
             start_blk = start_cyl * blk_per_cyl
             num_blk = num_cyl * blk_per_cyl
-
-            if debug:
-                print(f"[amifuse] Partition geometry:")
-                print(f"[amifuse]   Original: LowCyl={start_cyl} HighCyl={end_cyl} Surfaces={dos_env.surfaces} BlkPerTrack={dos_env.blk_per_trk}")
-                print(f"[amifuse]   Calculated: start_blk={start_blk} num_blk={num_blk} num_cyl={num_cyl}")
-
-            # Wrap backend so partition appears to start at block 0
-            self.backend = OffsetBlockDeviceBackend(self.backend, start_blk, num_blk)
-
-            # Patch DosEnvec for FFS compatibility
-            env_addr = boot["env_addr"]
-            self.mem.w32(env_addr + 0x24, 0)  # de_LowCyl = 0
-            self.mem.w32(env_addr + 0x28, num_cyl - 1)  # de_HighCyl = logical cylinders - 1
-            if debug:
-                print(f"[amifuse]   Patched DosEnvec: LowCyl=0 HighCyl={num_cyl - 1}")
+            print(f"[amifuse] Partition geometry:")
+            print(f"[amifuse]   DosEnvec: LowCyl={start_cyl} HighCyl={end_cyl} Surfaces={dos_env.surfaces} BlkPerTrack={dos_env.blk_per_trk}")
+            print(f"[amifuse]   Calculated: blk_per_cyl={blk_per_cyl} start_blk={start_blk} num_blk={num_blk}")
 
         self.vh.set_scsi_backend(self.backend, debug=debug)
 
