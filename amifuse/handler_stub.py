@@ -26,5 +26,5 @@ def build_entry_stub(mem, alloc, segment_start_addr):
     code += (segment_start_addr >> 16).to_bytes(2, "big")
     code += (segment_start_addr & 0xFFFF).to_bytes(2, "big")
     mem_obj = alloc.alloc_memory(len(code), label="handler_stub")
-    mem.w_block(mem_obj.addr, code)
+    mem.w_block(mem_obj.addr, bytes(code))
     return mem_obj.addr

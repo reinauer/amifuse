@@ -25,12 +25,37 @@ from amitools.vamos.libstructs.dos import (
     FileHandleStruct,
 )  # type: ignore
 from amitools.vamos.machine.regs import REG_A6, REG_A7, REG_D0  # type: ignore
-from amitools.vamos.schedule.stack import Stack  # type: ignore
-from amitools.vamos.schedule.task import Task  # type: ignore
+from amitools.vamos.task import Stack  # type: ignore
 from .amiga_structs import DeviceNodeStruct  # type: ignore
 from amitools.vamos.libstructs.exec_ import NodeStruct  # type: ignore
 from amitools.vamos.lib.DosLibrary import DosLibrary  # type: ignore
 from .handler_stub import build_entry_stub  # type: ignore
+
+
+def _get_block_state(cls, name, default=None):
+    """Safely get blocking state from ExecLibrary/DosLibrary class variables."""
+    return getattr(cls, name, default)
+
+
+def _set_block_state(cls, name, value):
+    """Safely set blocking state on ExecLibrary/DosLibrary class variables."""
+    try:
+        setattr(cls, name, value)
+    except (AttributeError, TypeError):
+        pass  # Class doesn't support this attribute
+
+
+def _clear_all_block_state():
+    """Clear all blocking state variables."""
+    from amitools.vamos.lib.ExecLibrary import ExecLibrary
+    _set_block_state(ExecLibrary, '_waitport_blocked_sp', None)
+    _set_block_state(ExecLibrary, '_waitport_blocked_port', None)
+    _set_block_state(ExecLibrary, '_waitport_blocked_ret', None)
+    _set_block_state(ExecLibrary, '_wait_blocked_mask', None)
+    _set_block_state(ExecLibrary, '_wait_blocked_sp', None)
+    _set_block_state(ExecLibrary, '_wait_blocked_ret', None)
+    _set_block_state(DosLibrary, '_waitpkt_blocked', False)
+
 
 # Dos packet opcodes we care about
 ACTION_STARTUP = 0
@@ -63,7 +88,6 @@ class HandlerLaunchState:
     stack: Stack
     stdpkt_addr: int
     msg_addr: int
-    task: Task
     run_state: object
     pc: int
     sp: int
@@ -100,6 +124,8 @@ class HandlerLauncher:
         self._stdpkt_ring_size = 8
         # Cache mp_SigBit offset for signal computation
         self._mp_sigbit_offset = MsgPortStruct.sdef.find_field_def_by_name("mp_SigBit").offset
+        # Local signal allocation tracking (bits 0-31, lower 16 reserved by system)
+        self._signals_allocated = 0x0000FFFF  # Reserve first 16 signals
 
     def _compute_pending_signals(self, mask: int = 0xFFFFFFFF) -> int:
         """Compute pending signals from all message ports AND tc_SigRecvd, ANDed with mask.
@@ -175,8 +201,9 @@ class HandlerLauncher:
         if sigbit is None:
             sigbit = self._alloc_signal_bit()
         else:
-            if 0 <= sigbit < len(self.exec_impl._signals):
-                self.exec_impl._signals[sigbit] = True
+            # Mark the signal bit as allocated in our local tracking
+            if 0 <= sigbit < 32:
+                self._signals_allocated |= (1 << sigbit)
         mp.w_s("mp_SigBit", sigbit)
         mp.w_s("mp_SigTask", task_addr)
         # Initialize mp_MsgList as a proper empty Amiga list
@@ -366,16 +393,13 @@ class HandlerLauncher:
         # Handler's own startup code will set up registers and call WaitPort/GetMsg
         # to retrieve the startup packet from pr_MsgPort.
         stub_pc = build_entry_stub(self.mem, self.alloc, self.segment_addr)
-        start_regs = {REG_A6: self.exec_base_addr}
-        task = Task("handler_task", stub_pc, stack, start_regs=start_regs)
         return HandlerLaunchState(
             process_addr=proc_addr,
             port_addr=port_addr,
             stack=stack,
             stdpkt_addr=startup_pkt,
             msg_addr=startup_msg,
-            task=task,
-            run_state=task.run_state,
+            run_state=None,
             pc=stub_pc,
             sp=stack.get_initial_sp(),
             started=False,
@@ -391,11 +415,12 @@ class HandlerLauncher:
         """
         from amitools.vamos.lib.ExecLibrary import ExecLibrary
 
-        waitport_sp = ExecLibrary._waitport_blocked_sp
-        wait_sp = ExecLibrary._wait_blocked_sp
-        waitport_ret = ExecLibrary._waitport_blocked_ret
-        wait_ret = ExecLibrary._wait_blocked_ret
-        wait_mask = ExecLibrary._wait_blocked_mask
+        # Get blocking state from ExecLibrary class variables (may not exist in new amitools)
+        waitport_sp = _get_block_state(ExecLibrary, '_waitport_blocked_sp')
+        wait_sp = _get_block_state(ExecLibrary, '_wait_blocked_sp')
+        waitport_ret = _get_block_state(ExecLibrary, '_waitport_blocked_ret')
+        wait_ret = _get_block_state(ExecLibrary, '_wait_blocked_ret')
+        wait_mask = _get_block_state(ExecLibrary, '_wait_blocked_mask')
 
         blocked_sp = waitport_sp if waitport_sp is not None else wait_sp
         if blocked_sp is None:
@@ -411,7 +436,7 @@ class HandlerLauncher:
             has_pending = pending != 0
         else:
             # WaitPort blocked - check for message on the specific port
-            waitport_port = ExecLibrary._waitport_blocked_port
+            waitport_port = _get_block_state(ExecLibrary, '_waitport_blocked_port')
             if waitport_sp is not None and waitport_port is not None:
                 check_port = waitport_port
             else:
@@ -450,10 +475,10 @@ class HandlerLauncher:
             self._clear_signals_from_task(pending)
         elif waitport_sp is not None:
             # WaitPort()/WaitPkt() resume - set D0 appropriately
-            waitport_port = ExecLibrary._waitport_blocked_port
+            waitport_port = _get_block_state(ExecLibrary, '_waitport_blocked_port')
             if waitport_port is not None:
                 msg_addr = self.exec_impl.port_mgr.peek_msg(waitport_port)
-                if DosLibrary._waitpkt_blocked and msg_addr:
+                if _get_block_state(DosLibrary, '_waitpkt_blocked', False) and msg_addr:
                     # WaitPkt() resume - extract packet from message
                     msg = AccessStruct(self.mem, MessageStruct, msg_addr)
                     pkt_addr = msg.r_s("mn_Node.ln_Name")
@@ -464,13 +489,7 @@ class HandlerLauncher:
                 cpu.w_reg(REG_D0, d0_val)
 
         # Clear blocked state
-        ExecLibrary._waitport_blocked_sp = None
-        ExecLibrary._waitport_blocked_port = None
-        ExecLibrary._waitport_blocked_ret = None
-        ExecLibrary._wait_blocked_mask = None
-        ExecLibrary._wait_blocked_sp = None
-        ExecLibrary._wait_blocked_ret = None
-        DosLibrary._waitpkt_blocked = False
+        _clear_all_block_state()
 
         return True
 
@@ -550,11 +569,11 @@ class HandlerLauncher:
             return run_state
         # Check if WaitPort or Wait blocked (saved state in ExecLibrary class variable)
         from amitools.vamos.lib.ExecLibrary import ExecLibrary
-        waitport_sp = ExecLibrary._waitport_blocked_sp
-        wait_sp = ExecLibrary._wait_blocked_sp
-        waitport_ret = ExecLibrary._waitport_blocked_ret
-        wait_ret = ExecLibrary._wait_blocked_ret
-        wait_mask = ExecLibrary._wait_blocked_mask
+        waitport_sp = _get_block_state(ExecLibrary, '_waitport_blocked_sp')
+        wait_sp = _get_block_state(ExecLibrary, '_wait_blocked_sp')
+        waitport_ret = _get_block_state(ExecLibrary, '_waitport_blocked_ret')
+        wait_ret = _get_block_state(ExecLibrary, '_wait_blocked_ret')
+        wait_mask = _get_block_state(ExecLibrary, '_wait_blocked_mask')
         # Use whichever blocking call was triggered
         blocked_sp = waitport_sp if waitport_sp is not None else wait_sp
         blocked_ret = waitport_ret if waitport_ret is not None else wait_ret
@@ -601,10 +620,10 @@ class HandlerLauncher:
                         self._clear_signals_from_task(pending)
                     elif waitport_sp is not None:
                         # WaitPort()/WaitPkt() resume - set D0 appropriately
-                        waitport_port = ExecLibrary._waitport_blocked_port
+                        waitport_port = _get_block_state(ExecLibrary, '_waitport_blocked_port')
                         if waitport_port is not None:
                             msg_addr = self.exec_impl.port_mgr.peek_msg(waitport_port)
-                            if DosLibrary._waitpkt_blocked and msg_addr:
+                            if _get_block_state(DosLibrary, '_waitpkt_blocked', False) and msg_addr:
                                 # WaitPkt() resume - extract packet from message
                                 msg = AccessStruct(self.mem, MessageStruct, msg_addr)
                                 pkt_addr = msg.r_s("mn_Node.ln_Name")
@@ -613,13 +632,7 @@ class HandlerLauncher:
                                 # WaitPort() resume - return message address
                                 cpu.w_reg(REG_D0, msg_addr if msg_addr else 0)
                     # Clear both blocking states
-                    ExecLibrary._waitport_blocked_port = None
-                    ExecLibrary._waitport_blocked_sp = None
-                    ExecLibrary._waitport_blocked_ret = None
-                    ExecLibrary._wait_blocked_mask = None
-                    ExecLibrary._wait_blocked_sp = None
-                    ExecLibrary._wait_blocked_ret = None
-                    DosLibrary._waitpkt_blocked = False
+                    _clear_all_block_state()
                 else:
                     # No message pending - save restart point for later
                     if _pc_valid(ret_addr):
@@ -673,10 +686,10 @@ class HandlerLauncher:
                         self._clear_signals_from_task(pending)
                     elif waitport_sp is not None:
                         # WaitPort()/WaitPkt() resume - set D0 appropriately
-                        waitport_port = ExecLibrary._waitport_blocked_port
+                        waitport_port = _get_block_state(ExecLibrary, '_waitport_blocked_port')
                         if waitport_port is not None:
                             msg_addr = self.exec_impl.port_mgr.peek_msg(waitport_port)
-                            if DosLibrary._waitpkt_blocked and msg_addr:
+                            if _get_block_state(DosLibrary, '_waitpkt_blocked', False) and msg_addr:
                                 # WaitPkt() resume - extract packet from message
                                 msg = AccessStruct(self.mem, MessageStruct, msg_addr)
                                 pkt_addr = msg.r_s("mn_Node.ln_Name")
@@ -685,13 +698,7 @@ class HandlerLauncher:
                                 # WaitPort() resume - return message address
                                 cpu.w_reg(REG_D0, msg_addr if msg_addr else 0)
                     # Clear the blocked states
-                    ExecLibrary._waitport_blocked_port = None
-                    ExecLibrary._waitport_blocked_sp = None
-                    ExecLibrary._waitport_blocked_ret = None
-                    ExecLibrary._wait_blocked_mask = None
-                    ExecLibrary._wait_blocked_sp = None
-                    ExecLibrary._wait_blocked_ret = None
-                    DosLibrary._waitpkt_blocked = False
+                    _clear_all_block_state()
                     state.exit_count = 0  # Reset exit counter
                 else:
                     # No message pending - save restart point but don't spin.
@@ -703,7 +710,6 @@ class HandlerLauncher:
                         state.pc = state.main_loop_pc
                         state.sp = state.main_loop_sp
                     # Keep blocked state so we know handler is waiting
-                    # Don't clear: ExecLibrary._waitport_blocked_port/sp or _wait_blocked_*
             else:
                 # Normal exit trap (RTS to run_exit_addr) without WaitPort block.
                 # For FFS, this means startup processing is complete. Check if there's
@@ -955,10 +961,10 @@ class HandlerLauncher:
         return self.send_packet(state, ACTION_FLUSH, [])
 
     def _alloc_signal_bit(self) -> int:
-        """Reserve a signal bit from exec's bitmap."""
-        # mirror ExecLibrary.AllocSignal logic
-        for idx, used in enumerate(self.exec_impl._signals):
-            if not used:
-                self.exec_impl._signals[idx] = True
-                return idx
-        return 0  # fallback; should not happen
+        """Reserve a signal bit from our local bitmap."""
+        for bit in range(32):
+            mask = 1 << bit
+            if (self._signals_allocated & mask) == 0:
+                self._signals_allocated |= mask
+                return bit
+        return 16  # fallback to first user signal

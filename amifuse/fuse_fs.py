@@ -28,7 +28,7 @@ except ImportError as e:
 from .driver_runtime import BlockDeviceBackend
 from .vamos_runner import VamosHandlerRuntime
 from .bootstrap import BootstrapAllocator
-from .startup_runner import HandlerLauncher, OFFSET_BEGINNING
+from .startup_runner import HandlerLauncher, OFFSET_BEGINNING, _get_block_state
 from amitools.vamos.astructs.access import AccessStruct  # type: ignore
 from amitools.vamos.libstructs.dos import FileInfoBlockStruct, FileHandleStruct, DosPacketStruct  # type: ignore
 from amitools.vamos.lib.dos.DosProtection import DosProtection  # type: ignore
@@ -264,7 +264,7 @@ class HandlerBridge:
                     print(f"[amifuse] _run_until_replies: got {len(replies)} replies after {i} iters")
                 break
             # If handler is blocked in WaitPort/Wait with no messages, stop spinning
-            if ExecLibrary._waitport_blocked_sp is not None or ExecLibrary._wait_blocked_sp is not None:
+            if _get_block_state(ExecLibrary, '_waitport_blocked_sp') is not None or _get_block_state(ExecLibrary, '_wait_blocked_sp') is not None:
                 # Handler is waiting for a message that isn't there yet
                 # This shouldn't happen if caller queued a message before calling us
                 break
@@ -292,10 +292,10 @@ class HandlerBridge:
             self.launcher.run_burst(self.state, max_cycles=cycles)
             if self.state.main_loop_pc:
                 return
-            waitport_sp = ExecLibrary._waitport_blocked_sp
-            wait_sp = ExecLibrary._wait_blocked_sp
-            waitport_ret = ExecLibrary._waitport_blocked_ret
-            wait_ret = ExecLibrary._wait_blocked_ret
+            waitport_sp = _get_block_state(ExecLibrary, '_waitport_blocked_sp')
+            wait_sp = _get_block_state(ExecLibrary, '_wait_blocked_sp')
+            waitport_ret = _get_block_state(ExecLibrary, '_waitport_blocked_ret')
+            wait_ret = _get_block_state(ExecLibrary, '_wait_blocked_ret')
             blocked_sp = waitport_sp if waitport_sp is not None else wait_sp
             blocked_ret = waitport_ret if waitport_ret is not None else wait_ret
             if blocked_sp is not None:

@@ -7,14 +7,28 @@ the handler into memory so we can later jump into it.
 
 import logging
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
 
 from amitools.vamos.cfg import VamosMainParser
+from amitools.vamos.error import UnsupportedFeatureError
 from amitools.vamos.log import log_machine, log_setup
-from amitools.vamos.machine import Machine, MemoryMap
+from amitools.vamos.machine import Machine, MemoryMap, Runtime
 from amitools.vamos.trace import TraceManager
+
+
+@dataclass
+class SimpleRunState:
+    """Simple run state for tracking machine execution results."""
+    pc: int
+    sp: int
+    done: bool = False
+    error: bool = False
+    cycles: int = 0
+
+
 from amitools.vamos.path import VamosPathManager
 from amitools.vamos.schedule import Scheduler
 from amitools.vamos.libmgr import SetupLibManager
@@ -48,6 +62,7 @@ class VamosHandlerRuntime:
         self.trace_mgr = None
         self.path_mgr = None
         self.scheduler = None
+        self.runtime = None
         self.slm: Optional[SetupLibManager] = None
         self.seglist_baddr: Optional[int] = None
         self._temp_dir: Optional[tempfile.TemporaryDirectory] = None
@@ -109,9 +124,20 @@ class VamosHandlerRuntime:
         # scheduler
         self.scheduler = Scheduler(self.machine)
 
+        # Create a runtime for m68k code execution
+        self.runtime = Runtime(self.machine, self.machine.scratch_end)
+
+        # runner function for library code execution
+        def runner(code, name=None):
+            task = self.scheduler.get_cur_task()
+            if task:
+                return task.sub_run(code, name=name)
+            else:
+                return self.runtime.run(code, name=name)
+
         # libs
         self.slm = SetupLibManager(
-            self.machine, self.mem_map, self.scheduler, self.path_mgr
+            self.machine, self.mem_map, runner, self.scheduler, self.path_mgr
         )
         if not self.slm.parse_config(libs_cfg):
             raise RuntimeError("Failed to parse lib manager config")
@@ -126,6 +152,74 @@ class VamosHandlerRuntime:
         self.slm.lib_mgr.add_impl_cls("keyboard.device", NullDevice)
         self.slm.lib_mgr.add_impl_cls("timer.device", NullDevice)
         self.slm.lib_mgr.add_impl_cls("console.device", NullDevice)
+
+        # Add run() method to machine for backwards compatibility
+        self._add_machine_run_method()
+
+    def _add_machine_run_method(self):
+        """Add a run() method to machine that provides the expected interface."""
+        machine = self.machine
+
+        def machine_run(pc, sp=None, set_regs=None, max_cycles=1000,
+                        cycles_per_run=None, name=None):
+            """Run m68k code and return a SimpleRunState.
+
+            If sp is provided and differs from current SP, prepare() is called
+            which pushes an exit trap. If sp matches current SP, we resume
+            without modifying the stack (for resuming from blocked state).
+            """
+            from amitools.vamos.machine.regs import REG_A7
+
+            cpu = machine.cpu
+            mem = machine.get_mem()
+
+            # Set up registers
+            if set_regs:
+                for reg, val in set_regs.items():
+                    cpu.w_reg(reg, val)
+
+            current_sp = cpu.r_reg(REG_A7)
+
+            # Check if we should use prepare() or just set PC directly
+            if sp is None:
+                sp = current_sp
+
+            # Only call prepare() for initial runs (when SP changes significantly)
+            # For resumption from blocked state, just set PC and SP directly
+            needs_prepare = abs(sp - current_sp) > 16  # Heuristic: significant SP change
+
+            if needs_prepare:
+                machine.prepare(pc, sp)
+            else:
+                # Resume without pushing exit trap - just set PC and SP
+                cpu.w_pc(pc)
+                cpu.w_sp(sp)
+
+            total_cycles = 0
+            done = False
+            error = False
+
+            try:
+                er = machine.execute(max_cycles)
+                total_cycles = er.cycles if hasattr(er, 'cycles') else max_cycles
+                done = machine.was_exit(er)
+            except UnsupportedFeatureError as e:
+                # WaitPort/WaitPkt blocked - this is expected behavior
+                error = True
+            except Exception as e:
+                import sys
+                print(f"[machine_run] Exception during execute: {type(e).__name__}: {e}", file=sys.stderr)
+                error = True
+
+            return SimpleRunState(
+                pc=cpu.r_pc(),
+                sp=cpu.r_sp(),
+                done=done,
+                error=error,
+                cycles=total_cycles,
+            )
+
+        machine.run = machine_run
 
     def set_scsi_backend(self, backend, debug=False):
         self.scsi_backend = backend
