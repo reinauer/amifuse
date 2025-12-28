@@ -2,5 +2,7 @@ Downloads/
 amifuse/__pycache__/
 attic/
 mnt/
-pfs.hdf
+*.hdf
+SmartFileSystem
+FastFileSystem
 pfs3aio
