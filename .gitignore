@@ -3,6 +3,7 @@ amifuse/__pycache__/
 attic/
 mnt/
 *.hdf
+*.adf
 SmartFileSystem
 FastFileSystem
 pfs3aio
