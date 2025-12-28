@@ -244,18 +244,3 @@ The `--icons` flag enables conversion of Amiga `.info` icon files to native Find
 - macOS Finder/Spotlight indexing is automatically disabled to improve performance
 - First directory traversal may be slow as the handler processes each path; subsequent accesses are cached
 
-## Troubleshooting
-
-**Slow Filesystem access**
-Yes, this code is incredibly slow. Please help me make it faster.
-
-**"Mountpoint is already a mount"**
-```bash
-umount -f ./mnt
-```
-
-**High CPU usage**
-This can happen when Finder or Spotlight are indexing the mount. The filesystem automatically rejects macOS metadata queries, but initial indexing attempts may still occur.
-
-**Permission denied**
-Ensure macFUSE is installed and your user has permission to use FUSE mounts.
