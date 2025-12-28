@@ -28,7 +28,8 @@ except ImportError as e:
 from .driver_runtime import BlockDeviceBackend
 from .vamos_runner import VamosHandlerRuntime
 from .bootstrap import BootstrapAllocator
-from .startup_runner import HandlerLauncher, OFFSET_BEGINNING, _get_block_state
+from .process_mgr import ProcessManager
+from .startup_runner import HandlerLauncher, OFFSET_BEGINNING, _get_block_state, _clear_all_block_state
 from amitools.vamos.astructs.access import AccessStruct  # type: ignore
 from amitools.vamos.libstructs.dos import FileInfoBlockStruct, FileHandleStruct, DosPacketStruct  # type: ignore
 from amitools.vamos.lib.dos.DosProtection import DosProtection  # type: ignore
@@ -131,16 +132,27 @@ class HandlerBridge:
             print(f"[amifuse] Segment: addr=0x{seg_addr:x} size={seg_size} end=0x{seg_addr+seg_size:x}")
         self.launcher = HandlerLauncher(self.vh, boot, seg_addr)
         self.state = self.launcher.launch_with_startup(debug=debug)
+
+        # Initialize ProcessManager early for multi-process support (e.g., SFS)
+        # This must happen before _run_until_replies since SFS creates children during startup
+        self.proc_mgr = ProcessManager(
+            vh=self.vh,
+            machine=self.vh.machine,
+            exec_impl=self.vh.slm.exec_impl,
+            parent_proc_addr=self.state.process_addr
+        )
+
         # run startup to completion
-        # Use higher cycle count for startup to avoid burst boundary issues.
-        # When a burst ends mid-execution, machine.run() writes exit trap 0x400
-        # to (SP), which can corrupt return addresses on the stack.
-        self._run_until_replies(cycles=2_000_000)
+        # Use moderate cycle count for startup to allow child processes to run.
+        # SFS creates child processes that need to run and register ports.
+        # Smaller bursts give us more chances to interleave child execution.
+        # Use small bursts for startup to frequently yield and run children
+        replies = self._run_until_replies(cycles=10_000, max_iters=2000)
         # Check if startup succeeded - res1=0 means the handler rejected the disk
         pkt = AccessStruct(self.mem, DosPacketStruct, self.state.stdpkt_addr)
         startup_res1 = pkt.r_s("dp_Res1")
         startup_res2 = pkt.r_s("dp_Res2")
-        if debug:
+        if self._debug:
             print(f"[amifuse] Startup packet result: res1={startup_res1} res2={startup_res2}")
         if startup_res1 == 0:
             # Handler rejected the disk - likely invalid filesystem signature
@@ -153,6 +165,13 @@ class HandlerBridge:
             error_desc = error_msgs.get(startup_res2, f"error code {startup_res2}")
             raise SystemExit(f"Filesystem handler rejected the disk: {error_desc}")
         self._update_handler_port_from_startup()
+        # Clear stale blocking state from startup before capturing main loop.
+        # Also set D0=0 so handler doesn't try to process non-existent message
+        # when it resumes from the WaitPort return address.
+        _clear_all_block_state()
+        from amitools.vamos.machine.regs import REG_D0
+        cpu = self.vh.machine.cpu
+        cpu.w_reg(REG_D0, 0)
         # Let the handler settle into its message wait loop.
         self._capture_main_loop_state()
         if not self.state.initialized:
@@ -263,15 +282,34 @@ class HandlerBridge:
                 if self._debug and i > 5:
                     print(f"[amifuse] _run_until_replies: got {len(replies)} replies after {i} iters")
                 break
-            # If handler is blocked in WaitPort/Wait with no messages, stop spinning
-            if _get_block_state(ExecLibrary, '_waitport_blocked_sp') is not None or _get_block_state(ExecLibrary, '_wait_blocked_sp') is not None:
-                # Handler is waiting for a message that isn't there yet
-                # This shouldn't happen if caller queued a message before calling us
-                break
+
+            # Run any child processes that were created (e.g., SFS DosList handler)
+            # This allows children to initialize and register their ports
+            if hasattr(self, 'proc_mgr'):
+                if self._debug and i < 5:
+                    print(f"[amifuse] iter {i}: calling run_all_ready_children")
+                num_children = self.proc_mgr.run_all_ready_children(cycles_per_child=cycles // 4)
+                if num_children > 0 and self._debug:
+                    print(f"[amifuse] Ran {num_children} child process(es)")
+                # CRITICAL: Clear global blocking state after running children.
+                # Otherwise the child's blocking state gets applied to the parent.
+                _clear_all_block_state()
+            else:
+                if self._debug and i < 5:
+                    print(f"[amifuse] iter {i}: no proc_mgr")
+
+            # Check for error FIRST - errors take precedence over blocked state
             if getattr(rs, "error", None):
-                # Error during run - might be WaitPort block, check if we have replies
+                # Error during run - might be WaitPort block or FindPort yield
+                # Check if we have replies first
                 replies = self.launcher.poll_replies(self.state.reply_port_addr, debug=self._debug)
-                break
+                if replies:
+                    break
+                # No replies - run children and continue (don't break)
+                if hasattr(self, 'proc_mgr'):
+                    self.proc_mgr.run_all_ready_children(cycles_per_child=cycles // 2)
+                    _clear_all_block_state()  # Clear child's blocking state
+                continue
             # If handler exited (done=True) without blocking, stop looping - it's not coming back
             if getattr(rs, "done", False) and not self.state.initialized:
                 # Handler exited during startup without entering main loop
@@ -285,11 +323,21 @@ class HandlerBridge:
             print(f"[amifuse] _run_until_replies: exhausted {max_iters} iters with no replies, pc=0x{self.state.pc:x}")
         return replies
 
-    def _capture_main_loop_state(self, max_iters: int = 10, cycles: int = 200_000):
+    def _capture_main_loop_state(self, max_iters: int = 50, cycles: int = 10_000):
         """Run until the handler blocks in Wait/WaitPort and capture restart PC/SP."""
         from amitools.vamos.lib.ExecLibrary import ExecLibrary
-        for _ in range(max_iters):
-            self.launcher.run_burst(self.state, max_cycles=cycles)
+        for i in range(max_iters):
+            if self.state.pc < 0x800 or self.state.pc > 0xFFFFFF:
+                print(f"[_capture] ERROR: invalid state.pc=0x{self.state.pc:x} before run_burst", file=sys.stderr)
+                return
+            rs = self.launcher.run_burst(self.state, max_cycles=cycles)
+
+            # Run child processes - SFS needs DosList handler to run during init
+            if hasattr(self, 'proc_mgr'):
+                self.proc_mgr.run_all_ready_children(cycles_per_child=cycles // 2)
+                # CRITICAL: Clear global blocking state after running children
+                _clear_all_block_state()
+
             if self.state.main_loop_pc:
                 return
             waitport_sp = _get_block_state(ExecLibrary, '_waitport_blocked_sp')
@@ -303,6 +351,12 @@ class HandlerBridge:
                 if ret_addr >= 0x800:
                     self.state.main_loop_pc = ret_addr
                     self.state.main_loop_sp = blocked_sp + 4
+                    if self._debug:
+                        print(f"[amifuse] _capture_main_loop_state: captured at iter {i}, pc=0x{ret_addr:x}, sp=0x{blocked_sp+4:x}")
+                return
+            # Check if handler crashed (invalid PC)
+            if rs and hasattr(rs, 'pc') and rs.pc < 0x800:
+                print(f"[amifuse] _capture_main_loop_state: handler crashed at iter {i}, pc=0x{rs.pc:x}", file=sys.stderr)
                 return
 
     def _update_handler_port_from_startup(self):
