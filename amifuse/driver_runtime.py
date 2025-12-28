@@ -32,22 +32,25 @@ from .startup_runner import HandlerLauncher  # noqa: E402
 class BlockDeviceBackend:
     """Thin wrapper around a host file to provide block reads/writes."""
 
-    def __init__(self, image: Path, block_size: Optional[int] = None, read_only=True, adf_info=None):
+    def __init__(self, image: Path, block_size: Optional[int] = None, read_only=True, adf_info=None, mbr_partition_index=None):
         self.image = image
         self.block_size = block_size or 512
         self.read_only = read_only
         self.blkdev: Optional[RawBlockDevice] = None
         self.rdb: Optional[RDisk] = None
         self.adf_info = adf_info  # ADFInfo if this is a floppy image
+        self.mbr_partition_index = mbr_partition_index  # For MBR disks with multiple 0x76 partitions
+        self.mbr_context = None  # MBRContext if opened via MBR partition
 
     def open(self):
-        self.blkdev = RawBlockDevice(
-            str(self.image), read_only=self.read_only, block_bytes=self.block_size
-        )
-        self.blkdev.open()
+        from .rdb_inspect import OffsetBlockDevice, MBRContext, detect_mbr, MBR_TYPE_AMIGA_RDB
 
-        # For ADF images, skip RDB parsing and use synthetic geometry
+        # For ADF images, skip RDB/MBR parsing and use synthetic geometry
         if self.adf_info is not None:
+            self.blkdev = RawBlockDevice(
+                str(self.image), read_only=self.read_only, block_bytes=self.block_size
+            )
+            self.blkdev.open()
             self.rdb = None
             self.block_size = self.adf_info.block_size
             self.cyls = self.adf_info.cylinders
@@ -56,25 +59,89 @@ class BlockDeviceBackend:
             self.total_blocks = self.adf_info.total_blocks
             return
 
+        # Try opening as direct RDB first
+        self.blkdev = RawBlockDevice(
+            str(self.image), read_only=self.read_only, block_bytes=self.block_size
+        )
+        self.blkdev.open()
+
         self.rdb = RDisk(self.blkdev)
-        # Try to auto-adjust block size if the RDB disagrees.
         peeked = self.rdb.peek_block_size()
-        if peeked and peeked != self.blkdev.block_bytes:
+
+        if peeked:
+            # Found RDB directly
+            if peeked != self.blkdev.block_bytes:
+                self.close()
+                self.blkdev = RawBlockDevice(
+                    str(self.image), read_only=self.read_only, block_bytes=peeked
+                )
+                self.blkdev.open()
+                self.rdb = RDisk(self.blkdev)
+            if self.rdb.open():
+                # Direct RDB success
+                pd = self.rdb.rdb.phy_drv
+                self.block_size = self.blkdev.block_bytes
+                self.cyls = pd.cyls
+                self.heads = pd.heads
+                self.secs = pd.secs
+                self.total_blocks = pd.cyls * pd.heads * pd.secs
+                return
+
+        # No direct RDB - check for MBR with 0x76 partitions
+        mbr_info = detect_mbr(self.image)
+        if mbr_info is not None and mbr_info.has_amiga_partitions:
+            amiga_parts = [p for p in mbr_info.partitions if p.partition_type == MBR_TYPE_AMIGA_RDB]
+
+            if self.mbr_partition_index is not None:
+                if self.mbr_partition_index >= len(amiga_parts):
+                    self.close()
+                    raise IOError(
+                        f"MBR partition index {self.mbr_partition_index} out of range "
+                        f"(found {len(amiga_parts)} Amiga partitions)"
+                    )
+                amiga_parts = [amiga_parts[self.mbr_partition_index]]
+
+            # Try each 0x76 partition
+            for mbr_part in amiga_parts:
+                offset_dev = OffsetBlockDevice(self.blkdev, mbr_part.start_lba, mbr_part.num_sectors)
+
+                test_rdb = RDisk(offset_dev)
+                peeked = test_rdb.peek_block_size()
+                if peeked:
+                    if peeked != self.blkdev.block_bytes:
+                        # Need to reopen with correct block size
+                        self.blkdev.close()
+                        self.blkdev = RawBlockDevice(
+                            str(self.image), read_only=self.read_only, block_bytes=peeked
+                        )
+                        self.blkdev.open()
+                        offset_dev = OffsetBlockDevice(self.blkdev, mbr_part.start_lba, mbr_part.num_sectors)
+
+                    self.rdb = RDisk(offset_dev)
+                    if self.rdb.open():
+                        # Success - set up geometry and context
+                        pd = self.rdb.rdb.phy_drv
+                        self.block_size = offset_dev.block_bytes
+                        self.cyls = pd.cyls
+                        self.heads = pd.heads
+                        self.secs = pd.secs
+                        self.total_blocks = pd.cyls * pd.heads * pd.secs
+                        # OffsetBlockDevice.close() will close the underlying raw device
+                        self.blkdev = offset_dev
+                        self.mbr_context = MBRContext(
+                            mbr_info=mbr_info,
+                            mbr_partition=mbr_part,
+                            offset_blocks=mbr_part.start_lba,
+                        )
+                        return
+
             self.close()
-            self.blkdev = RawBlockDevice(
-                str(self.image), read_only=self.read_only, block_bytes=peeked
+            raise IOError(
+                f"MBR with Amiga partition(s) found, but none contain a valid RDB: {self.image}"
             )
-            self.blkdev.open()
-            self.rdb = RDisk(self.blkdev)
-        if not self.rdb.open():
-            raise IOError(f"Failed to parse RDB on {self.image}")
-        # cache geometry for devices like scsi.device
-        pd = self.rdb.rdb.phy_drv
-        self.block_size = self.blkdev.block_bytes
-        self.cyls = pd.cyls
-        self.heads = pd.heads
-        self.secs = pd.secs
-        self.total_blocks = pd.cyls * pd.heads * pd.secs
+
+        self.close()
+        raise IOError(f"Failed to parse RDB on {self.image}")
 
     def close(self):
         if self.rdb:
@@ -92,12 +159,6 @@ class BlockDeviceBackend:
             raise RuntimeError("Block device not open")
         if self.read_only:
             raise PermissionError("Backend opened read-only")
-        # Debug: track that writes are happening
-        if not hasattr(self, '_write_count'):
-            self._write_count = 0
-        self._write_count += 1
-        if self._write_count <= 5 or self._write_count % 100 == 0:
-            print(f"[backend] write_blocks blk={blk_num} num={num_blks} (total writes: {self._write_count})", flush=True)
         self.blkdev.write_block(blk_num, data, num_blks)
 
     def sync(self):
@@ -114,10 +175,17 @@ class BlockDeviceBackend:
             )
         assert self.rdb is not None
         pd = self.rdb.rdb.phy_drv
-        return (
+        base_desc = (
             f"{self.image} cyls={pd.cyls} heads={pd.heads} secs={pd.secs} "
             f"block={self.blkdev.block_bytes if self.blkdev else self.block_size}"
         )
+        if self.mbr_context is not None:
+            mbr_part = self.mbr_context.mbr_partition
+            base_desc += (
+                f" [MBR partition {mbr_part.index}: "
+                f"start={mbr_part.start_lba} size={mbr_part.num_sectors}]"
+            )
+        return base_desc
 
 
 class DriverRuntimeSkeleton:

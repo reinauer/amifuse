@@ -8,7 +8,6 @@ from typing import Optional
 
 from amitools.vamos.astructs.access import AccessStruct  # type: ignore
 from amitools.fs.blkdev.RawBlockDevice import RawBlockDevice  # type: ignore
-from amitools.fs.rdb.RDisk import RDisk  # type: ignore
 
 from .amiga_structs import DosEnvecStruct, FileSysStartupMsgStruct, DeviceNodeStruct
 from amitools.vamos.libstructs.exec_ import MsgPortStruct, ListStruct, NodeType  # type: ignore
@@ -61,15 +60,15 @@ class BootstrapAllocator:
         self.adf_info = adf_info  # Pre-detected ADF info, if any
 
     def _read_partition_env(self):
-        blk = RawBlockDevice(str(self.image_path), read_only=True, block_bytes=self.block_size)
-        blk.open()
-        rd = RDisk(blk)
-        rd.open()
+        from .rdb_inspect import open_rdisk
+
+        blk, rd, mbr_ctx = open_rdisk(self.image_path, block_size=self.block_size)
         if self.partition is None:
             part = rd.get_partition(0)
         else:
             part = rd.find_partition_by_string(str(self.partition))
             if part is None:
+                rd.close()
                 blk.close()
                 raise ValueError(f"Partition '{self.partition}' not found")
         de = part.part_blk.dos_env

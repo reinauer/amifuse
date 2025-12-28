@@ -1662,7 +1662,7 @@ class AmigaFuseFS(Operations):
 def get_partition_info(image: Path, block_size: Optional[int], partition: Optional[str]) -> dict:
     """Get partition name and dostype from RDB."""
     from .rdb_inspect import open_rdisk
-    blkdev, rdisk = open_rdisk(image, block_size=block_size)
+    blkdev, rdisk, _mbr_ctx = open_rdisk(image, block_size=block_size)
     try:
         if partition is None:
             part = rdisk.get_partition(0)
@@ -1693,7 +1693,7 @@ def extract_embedded_driver(image: Path, block_size: Optional[int], partition: O
     import amitools.fs.DosType as DosType
     from .rdb_inspect import open_rdisk
 
-    blkdev, rdisk = open_rdisk(image, block_size=block_size)
+    blkdev, rdisk, _mbr_ctx = open_rdisk(image, block_size=block_size)
     try:
         # Get the partition and its dostype
         if partition is None:
@@ -1884,7 +1884,7 @@ __version__ = "0.1.0"
 def cmd_inspect(args):
     """Handle the 'inspect' subcommand."""
     import amitools.fs.DosType as DosType
-    from .rdb_inspect import open_rdisk, format_fs_summary, detect_adf
+    from .rdb_inspect import open_rdisk, format_fs_summary, format_mbr_info, detect_adf
 
     # First check for ADF
     adf_info = detect_adf(args.image)
@@ -1903,11 +1903,19 @@ def cmd_inspect(args):
 
     blkdev = None
     rdisk = None
+    mbr_ctx = None
     try:
         try:
-            blkdev, rdisk = open_rdisk(args.image, block_size=args.block_size)
+            blkdev, rdisk, mbr_ctx = open_rdisk(args.image, block_size=args.block_size)
         except IOError as e:
             raise SystemExit(f"Error: {e}")
+
+        # Show MBR info if present
+        if mbr_ctx is not None:
+            for line in format_mbr_info(mbr_ctx):
+                print(line)
+            print()
+
         for line in rdisk.get_info(full=args.full):
             print(line)
         fs_lines = format_fs_summary(rdisk)
