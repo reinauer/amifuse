@@ -19,6 +19,7 @@ CMD_WRITE = 3  # TD_WRITE
 CMD_UPDATE = 4  # Flush buffers
 CMD_CLEAR = 5  # Clear buffers
 TD_SEEK = 10
+TD_CHANGENUM = 13
 TD_ADDCHANGEINT = 20
 TD_REMCHANGEINT = 21
 TD_GETGEOMETRY = 22
@@ -118,7 +119,7 @@ class ScsiDevice(LibImpl):
         # SCSI command dispatch
         cmd_names = {
             2: "CMD_READ", 3: "CMD_WRITE", 4: "CMD_UPDATE", 5: "CMD_CLEAR",
-            9: "TD_MOTOR", 10: "TD_SEEK", 11: "TD_FORMAT",
+            9: "TD_MOTOR", 10: "TD_SEEK", 11: "TD_FORMAT", 13: "TD_CHANGENUM",
             14: "TD_CHANGESTATE", 15: "TD_PROTSTATUS", 18: "TD_GETDRIVETYPE",
             20: "TD_ADDCHANGEINT", 21: "TD_REMCHANGEINT", 22: "TD_GETGEOMETRY",
             28: "HD_SCSICMD",
@@ -254,6 +255,9 @@ class ScsiDevice(LibImpl):
         elif cmd == 11:  # TD_FORMAT
             # Format tracks - no-op for existing disk images
             ior.w_s("io_Actual", length)
+        elif cmd == TD_CHANGENUM:  # TD_CHANGENUM (13)
+            # Return disk change count - always 0, disk never changes
+            ior.w_s("io_Actual", 0)
         elif cmd == 14:  # TD_CHANGESTATE
             # Check if disk is present: io_Actual=0 means disk present
             ior.w_s("io_Actual", 0)
