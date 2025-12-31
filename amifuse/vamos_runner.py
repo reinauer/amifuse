@@ -149,8 +149,9 @@ class VamosHandlerRuntime:
         self.scsi_debug = False
         self.slm.lib_mgr.add_impl_cls("scsi.device", lambda: ScsiDevice(self.scsi_backend, self.scsi_debug))
         from amifuse.null_device import NullDevice  # lazy import to avoid cycles
+        from amitools.vamos.lib.TimerDevice import TimerDevice
         self.slm.lib_mgr.add_impl_cls("keyboard.device", NullDevice)
-        self.slm.lib_mgr.add_impl_cls("timer.device", NullDevice)
+        self.slm.lib_mgr.add_impl_cls("timer.device", TimerDevice)
         self.slm.lib_mgr.add_impl_cls("console.device", NullDevice)
 
         # Add run() method to machine for backwards compatibility
