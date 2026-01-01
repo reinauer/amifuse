@@ -4,7 +4,7 @@ Mount Amiga filesystem images on macOS/Linux/Windows using native AmigaOS filesy
 
 amifuse runs actual Amiga filesystem drivers (like PFS3) through m68k CPU emulation, allowing you to read Amiga hard disk images without relying on reverse-engineered implementations.
 
-![XSysInfo](Docs/amifuse.png)
+![amifuse](https://raw.githubusercontent.com/reinauer/amifuse/main/Docs/amifuse.png)
 
 ## Requirements
 
