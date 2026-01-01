@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "amifuse"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Mount Amiga filesystem images via FUSE using native AmigaOS handlers"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -25,6 +25,7 @@ classifiers = [
 
 dependencies = [
     "fusepy>=3.0",
+    "amitools-amifuse[vamos]",
 ]
 
 [project.scripts]
@@ -37,3 +38,5 @@ Homepage = "https://github.com/reinauer/amifuse"
 
 [tool.setuptools.packages.find]
 include = ["amifuse*"]
+
+[tool.setuptools_scm]
