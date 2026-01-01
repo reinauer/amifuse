@@ -40,3 +40,4 @@ Homepage = "https://github.com/reinauer/amifuse"
 include = ["amifuse*"]
 
 [tool.setuptools_scm]
+local_scheme = "no-local-version"
