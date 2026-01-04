@@ -45,10 +45,14 @@ pip install --user -e .
 
 ### macOS-specific
 
-Install macFUSE from https://osxfuse.github.io/ or via Homebrew:
+Install macFUSE from https://osxfuse.github.io/ or via Homebrew/MacPorts:
 
 ```bash
+# Homebrew
 brew install --cask macfuse
+
+# MacPorts
+port install macfuse +fs_link
 ```
 
 You may need to reboot and allow the kernel extension in System Preferences > Security & Privacy.
@@ -244,4 +248,3 @@ The `--icons` flag enables conversion of Amiga `.info` icon files to native Find
 - The mount runs in the foreground; press Ctrl+C to unmount
 - macOS Finder/Spotlight indexing is automatically disabled to improve performance
 - First directory traversal may be slow as the handler processes each path; subsequent accesses are cached
-
