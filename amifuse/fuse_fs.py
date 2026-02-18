@@ -79,7 +79,15 @@ class HandlerBridge:
         self._lock = threading.RLock()  # Reentrant lock for thread safety
         self._debug = debug
         self._adf_info = adf_info
-        self.backend = BlockDeviceBackend(image, block_size=block_size, read_only=read_only, adf_info=adf_info)
+        # For MBR images with multiple 0x76 partitions, find the right one
+        mbr_idx = None
+        if partition and adf_info is None:
+            from .rdb_inspect import find_partition_mbr_index
+            mbr_idx = find_partition_mbr_index(image, block_size, partition)
+        self.backend = BlockDeviceBackend(
+            image, block_size=block_size, read_only=read_only, adf_info=adf_info,
+            mbr_partition_index=mbr_idx,
+        )
         self.backend.open()
         self.vh = VamosHandlerRuntime()
         # Use 68020 CPU for compatibility with SFS and other modern handlers
@@ -89,7 +97,10 @@ class HandlerBridge:
         self.mem = self.vh.alloc.get_mem()
         seg_baddr = self.vh.load_handler(driver)
         # Build DeviceNode/FSSM using seglist bptr
-        ba = BootstrapAllocator(self.vh, image, partition=partition, adf_info=adf_info)
+        ba = BootstrapAllocator(
+            self.vh, image, partition=partition, adf_info=adf_info,
+            mbr_partition_index=mbr_idx,
+        )
         handler_name = "DF0:" if adf_info else "DH0:"
         boot = ba.alloc_all(handler_seglist_baddr=seg_baddr, handler_seglist_bptr=seg_baddr, handler_name=handler_name)
         self._partition_index = boot["part"].num if boot.get("part") else 0
@@ -1661,8 +1672,9 @@ class AmigaFuseFS(Operations):
 
 def get_partition_info(image: Path, block_size: Optional[int], partition: Optional[str]) -> dict:
     """Get partition name and dostype from RDB."""
-    from .rdb_inspect import open_rdisk
-    blkdev, rdisk, _mbr_ctx = open_rdisk(image, block_size=block_size)
+    from .rdb_inspect import open_rdisk, find_partition_mbr_index
+    mbr_idx = find_partition_mbr_index(image, block_size, partition) if partition else None
+    blkdev, rdisk, _mbr_ctx = open_rdisk(image, block_size=block_size, mbr_partition_index=mbr_idx)
     try:
         if partition is None:
             part = rdisk.get_partition(0)
@@ -1691,9 +1703,10 @@ def extract_embedded_driver(image: Path, block_size: Optional[int], partition: O
     """
     import tempfile
     import amitools.fs.DosType as DosType
-    from .rdb_inspect import open_rdisk
+    from .rdb_inspect import open_rdisk, find_partition_mbr_index
 
-    blkdev, rdisk, _mbr_ctx = open_rdisk(image, block_size=block_size)
+    mbr_idx = find_partition_mbr_index(image, block_size, partition) if partition else None
+    blkdev, rdisk, _mbr_ctx = open_rdisk(image, block_size=block_size, mbr_partition_index=mbr_idx)
     try:
         # Get the partition and its dostype
         if partition is None:
@@ -1881,10 +1894,29 @@ def mount_fuse(
 __version__ = "v0.2.0"
 
 
+def _inspect_rdisk(rdisk, full=False):
+    """Print RDB info, filesystem drivers, and warnings for a single RDisk."""
+    from .rdb_inspect import format_fs_summary
+    for line in rdisk.get_info(full=full):
+        print(line)
+    fs_lines = format_fs_summary(rdisk)
+    if fs_lines:
+        print("\nFilesystem drivers:")
+        for line in fs_lines:
+            print(" ", line)
+    warnings = getattr(rdisk, 'rdb_warnings', [])
+    if warnings:
+        print("\nWarnings:")
+        for w in warnings:
+            print(f"  {w}")
+
+
 def cmd_inspect(args):
     """Handle the 'inspect' subcommand."""
     import amitools.fs.DosType as DosType
-    from .rdb_inspect import open_rdisk, format_fs_summary, format_mbr_info, detect_adf
+    from .rdb_inspect import (
+        open_rdisk, format_mbr_info, detect_adf, detect_mbr, MBR_TYPE_AMIGA_RDB,
+    )
 
     # First check for ADF
     adf_info = detect_adf(args.image)
@@ -1901,39 +1933,62 @@ def cmd_inspect(args):
         print("Use --driver to specify a filesystem handler when mounting.")
         return
 
-    blkdev = None
-    rdisk = None
-    mbr_ctx = None
-    try:
+    # Detect if MBR with multiple 0x76 partitions
+    mbr_info = detect_mbr(args.image)
+    multi_rdb = False
+    amiga_parts = []
+    if mbr_info and mbr_info.has_amiga_partitions:
+        amiga_parts = [p for p in mbr_info.partitions if p.partition_type == MBR_TYPE_AMIGA_RDB]
+        if len(amiga_parts) > 1:
+            multi_rdb = True
+
+    if multi_rdb:
+        # Show MBR table once using first partition's context
         try:
-            blkdev, rdisk, mbr_ctx = open_rdisk(args.image, block_size=args.block_size)
+            blkdev, rdisk, mbr_ctx = open_rdisk(args.image, block_size=args.block_size, mbr_partition_index=0)
         except IOError as e:
             raise SystemExit(f"Error: {e}")
-
-        # Show MBR info if present
-        if mbr_ctx is not None:
-            for line in format_mbr_info(mbr_ctx):
-                print(line)
-            print()
-
-        for line in rdisk.get_info(full=args.full):
+        for line in format_mbr_info(mbr_ctx):
             print(line)
-        fs_lines = format_fs_summary(rdisk)
-        if fs_lines:
-            print("\nFilesystem drivers:")
-            for line in fs_lines:
-                print(" ", line)
+        rdisk.close()
+        blkdev.close()
 
-        warnings = getattr(rdisk, 'rdb_warnings', [])
-        if warnings:
-            print("\nWarnings:")
-            for w in warnings:
-                print(f"  {w}")
-    finally:
-        if rdisk is not None:
-            rdisk.close()
-        if blkdev is not None:
-            blkdev.close()
+        # Show each RDB
+        for rdb_idx in range(len(amiga_parts)):
+            try:
+                blkdev, rdisk, mbr_ctx = open_rdisk(
+                    args.image, block_size=args.block_size, mbr_partition_index=rdb_idx
+                )
+            except IOError as e:
+                print(f"\nMBR partition [{amiga_parts[rdb_idx].index}]: Error: {e}")
+                continue
+            try:
+                print(f"\n=== Amiga RDB in MBR partition [{mbr_ctx.mbr_partition.index}]"
+                      f" (offset: {mbr_ctx.offset_blocks} sectors) ===\n")
+                _inspect_rdisk(rdisk, full=args.full)
+            finally:
+                rdisk.close()
+                blkdev.close()
+    else:
+        # Single RDB (or non-MBR): existing behavior
+        blkdev = None
+        rdisk = None
+        mbr_ctx = None
+        try:
+            try:
+                blkdev, rdisk, mbr_ctx = open_rdisk(args.image, block_size=args.block_size)
+            except IOError as e:
+                raise SystemExit(f"Error: {e}")
+            if mbr_ctx is not None:
+                for line in format_mbr_info(mbr_ctx):
+                    print(line)
+                print()
+            _inspect_rdisk(rdisk, full=args.full)
+        finally:
+            if rdisk is not None:
+                rdisk.close()
+            if blkdev is not None:
+                blkdev.close()
 
 
 def cmd_mount(args):
