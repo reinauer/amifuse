@@ -50,7 +50,7 @@ class SyntheticPartition:
 
 
 class BootstrapAllocator:
-    def __init__(self, vh, image_path: Path, block_size=512, partition=None, adf_info: Optional[ADFInfo] = None):
+    def __init__(self, vh, image_path: Path, block_size=512, partition=None, adf_info: Optional[ADFInfo] = None, mbr_partition_index=None):
         self.vh = vh
         self.alloc = vh.alloc
         self.mem = vh.alloc.get_mem()
@@ -58,11 +58,15 @@ class BootstrapAllocator:
         self.block_size = block_size
         self.partition = partition  # name, index, or None for first
         self.adf_info = adf_info  # Pre-detected ADF info, if any
+        self.mbr_partition_index = mbr_partition_index  # For MBR disks with multiple 0x76 partitions
 
     def _read_partition_env(self):
         from .rdb_inspect import open_rdisk
 
-        blk, rd, mbr_ctx = open_rdisk(self.image_path, block_size=self.block_size)
+        blk, rd, mbr_ctx = open_rdisk(
+            self.image_path, block_size=self.block_size,
+            mbr_partition_index=self.mbr_partition_index,
+        )
         if self.partition is None:
             part = rd.get_partition(0)
         else:

@@ -470,6 +470,37 @@ def open_rdisk(
     raise IOError(error_msg)
 
 
+def find_partition_mbr_index(
+    image: Path, block_size: Optional[int], partition_name: str
+) -> Optional[int]:
+    """Find which 0x76 MBR partition index contains a named Amiga partition.
+
+    For MBR images with multiple 0x76 partitions, searches each RDB for the
+    named partition.  Returns the 0-based index into the list of 0x76
+    partitions, or None if the image is not MBR, has only one 0x76 partition,
+    or the partition is found in the default (first) RDB.
+    """
+    mbr_info = detect_mbr(image)
+    if mbr_info is None or not mbr_info.has_amiga_partitions:
+        return None
+    amiga_parts = [p for p in mbr_info.partitions if p.partition_type == MBR_TYPE_AMIGA_RDB]
+    if len(amiga_parts) <= 1:
+        return None
+    for idx in range(len(amiga_parts)):
+        try:
+            blkdev, rdisk, _ = open_rdisk(image, block_size=block_size, mbr_partition_index=idx)
+            try:
+                part = rdisk.find_partition_by_string(str(partition_name))
+                if part is not None:
+                    return idx
+            finally:
+                rdisk.close()
+                blkdev.close()
+        except IOError:
+            continue
+    return None
+
+
 def format_fs_summary(rdisk: RDisk):
     lines = []
     for fs in rdisk.fs:
@@ -561,40 +592,105 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
-    blkdev = None
-    rdisk = None
-    mbr_ctx = None
-    try:
-        blkdev, rdisk, mbr_ctx = open_rdisk(args.image, block_size=args.block_size)
+    # Detect if MBR with multiple 0x76 partitions
+    mbr_info = detect_mbr(args.image)
+    multi_rdb = False
+    amiga_parts = []
+    if mbr_info and mbr_info.has_amiga_partitions:
+        amiga_parts = [p for p in mbr_info.partitions if p.partition_type == MBR_TYPE_AMIGA_RDB]
+        if len(amiga_parts) > 1:
+            multi_rdb = True
 
-        warnings = getattr(rdisk, 'rdb_warnings', [])
-
-        if args.json:
-            desc = rdisk.get_desc()
-            if mbr_ctx is not None:
-                mbr_desc = {
-                    "scheme": mbr_ctx.scheme,
-                    "offset_blocks": mbr_ctx.offset_blocks,
-                    "all_partitions": [
-                        {
-                            "index": p.index,
-                            "type": p.partition_type,
-                            "bootable": p.bootable,
-                            "start_lba": p.start_lba,
-                            "num_sectors": p.num_sectors,
-                        }
-                        for p in mbr_ctx.mbr_info.partitions
-                    ],
-                }
-                if mbr_ctx.mbr_partition is not None:
-                    mbr_desc["partition_index"] = mbr_ctx.mbr_partition.index
-                    mbr_desc["partition_size"] = mbr_ctx.mbr_partition.num_sectors
-                desc["mbr"] = mbr_desc
-            if warnings:
-                desc["warnings"] = warnings
-            print(json.dumps(desc, indent=2))
+    if args.json:
+        # JSON mode: collect all RDBs into a single JSON structure
+        all_rdbs = []
+        for rdb_idx in range(len(amiga_parts) if multi_rdb else 1):
+            mbr_partition_index = rdb_idx if multi_rdb else None
+            try:
+                blkdev, rdisk, mbr_ctx = open_rdisk(
+                    args.image, block_size=args.block_size, mbr_partition_index=mbr_partition_index
+                )
+            except IOError:
+                continue
+            try:
+                desc = rdisk.get_desc()
+                if mbr_ctx is not None:
+                    mbr_desc = {
+                        "scheme": mbr_ctx.scheme,
+                        "offset_blocks": mbr_ctx.offset_blocks,
+                        "all_partitions": [
+                            {
+                                "index": p.index,
+                                "type": p.partition_type,
+                                "bootable": p.bootable,
+                                "start_lba": p.start_lba,
+                                "num_sectors": p.num_sectors,
+                            }
+                            for p in mbr_ctx.mbr_info.partitions
+                        ],
+                    }
+                    if mbr_ctx.mbr_partition is not None:
+                        mbr_desc["partition_index"] = mbr_ctx.mbr_partition.index
+                        mbr_desc["partition_size"] = mbr_ctx.mbr_partition.num_sectors
+                    desc["mbr"] = mbr_desc
+                warnings = getattr(rdisk, 'rdb_warnings', [])
+                if warnings:
+                    desc["warnings"] = warnings
+                all_rdbs.append(desc)
+            finally:
+                rdisk.close()
+                blkdev.close()
+        if len(all_rdbs) == 1:
+            print(json.dumps(all_rdbs[0], indent=2))
         else:
-            # Show MBR info if present
+            print(json.dumps(all_rdbs, indent=2))
+    elif multi_rdb:
+        # Text mode with multiple RDBs: show MBR table once, then each RDB
+        try:
+            blkdev, rdisk, mbr_ctx = open_rdisk(
+                args.image, block_size=args.block_size, mbr_partition_index=0
+            )
+        except IOError as e:
+            raise SystemExit(f"Error: {e}")
+        for line in format_mbr_info(mbr_ctx):
+            print(line)
+        rdisk.close()
+        blkdev.close()
+
+        for rdb_idx in range(len(amiga_parts)):
+            try:
+                blkdev, rdisk, mbr_ctx = open_rdisk(
+                    args.image, block_size=args.block_size, mbr_partition_index=rdb_idx
+                )
+            except IOError as e:
+                print(f"\nMBR partition [{amiga_parts[rdb_idx].index}]: Error: {e}")
+                continue
+            try:
+                print(f"\n=== Amiga RDB in MBR partition [{mbr_ctx.mbr_partition.index}]"
+                      f" (offset: {mbr_ctx.offset_blocks} sectors) ===\n")
+                for line in rdisk.get_info(full=args.full):
+                    print(line)
+                fs_lines = format_fs_summary(rdisk)
+                if fs_lines:
+                    print("\nFilesystem drivers:")
+                    for line in fs_lines:
+                        print(" ", line)
+                warnings = getattr(rdisk, 'rdb_warnings', [])
+                if warnings:
+                    print("\nWarnings:")
+                    for w in warnings:
+                        print(f"  {w}")
+            finally:
+                rdisk.close()
+                blkdev.close()
+    else:
+        # Single RDB: original behavior
+        blkdev = None
+        rdisk = None
+        mbr_ctx = None
+        try:
+            blkdev, rdisk, mbr_ctx = open_rdisk(args.image, block_size=args.block_size)
+
             if mbr_ctx is not None:
                 for line in format_mbr_info(mbr_ctx):
                     print(line)
@@ -608,12 +704,21 @@ def main(argv=None):
                 for line in fs_lines:
                     print(" ", line)
 
+            warnings = getattr(rdisk, 'rdb_warnings', [])
             if warnings:
                 print("\nWarnings:")
                 for w in warnings:
                     print(f"  {w}")
+        finally:
+            if rdisk is not None:
+                rdisk.close()
+            if blkdev is not None:
+                blkdev.close()
 
-        if args.extract_fs is not None:
+    if args.extract_fs is not None:
+        # Extract from first RDB (use --mbr-partition for specific one in future)
+        blkdev, rdisk, _ = open_rdisk(args.image, block_size=args.block_size)
+        try:
             fs_obj = rdisk.get_filesystem(args.extract_fs)
             if fs_obj is None:
                 raise SystemExit(f"No filesystem #{args.extract_fs} in RDB.")
@@ -622,10 +727,8 @@ def main(argv=None):
             out_path = args.out or Path(default_name)
             saved_to = extract_fs(rdisk, args.extract_fs, out_path)
             print(f"Wrote filesystem #{args.extract_fs} ({hex(dt)}) to {saved_to}")
-    finally:
-        if rdisk is not None:
+        finally:
             rdisk.close()
-        if blkdev is not None:
             blkdev.close()
 
 
