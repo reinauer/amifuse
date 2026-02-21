@@ -2126,7 +2126,7 @@ def mount_fuse(
             temp_volicon.unlink()
 
 
-__version__ = "v0.2.0"
+__version__ = "v0.3.0"
 __banner__ = f"amifuse {__version__} - Copyright (C) 2025-2026 by Stefan Reinauer"
 
 
@@ -2253,6 +2253,24 @@ def main(argv=None):
         description=f"{__banner__}\n\n"
         "Mount Amiga filesystem images via FUSE.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+commands:
+  inspect <image>           Inspect RDB partitions and filesystems.
+    --block-size N            Override block size (defaults to auto/512).
+    --full                    Show full partition details.
+
+  mount <image>             Mount an Amiga filesystem image via FUSE.
+    --driver PATH             Filesystem binary (default: extract from RDB).
+    --mountpoint PATH         Mount location (default: /Volumes/<partition>).
+    --partition NAME          Partition name (e.g. DH0) or index (defaults to first).
+    --block-size N            Override block size (defaults to auto/512).
+    --volname NAME            Override macFUSE volume name (defaults to partition name).
+    --write                   Enable read-write mode (experimental).
+    --icons                   Convert Amiga .info icons to native macOS icons (experimental).
+    --debug                   Enable debug logging of FUSE operations.
+    --trace                   Enable vamos instruction tracing (very noisy).
+    --profile                 Enable profiling and write stats to profile.txt.
+""",
     )
     parser.add_argument(
         "--version",
