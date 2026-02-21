@@ -230,7 +230,7 @@ class VamosHandlerRuntime:
             return
         _ensure_vamos_logging({"machine": "info"})
         log_machine.setLevel(logging.INFO)
-        self.machine.show_instr(show_regs=show_regs)
+        self.trace_mgr.setup_cpu_instr_trace(show_regs)
 
     def load_handler(self, handler_path: Path) -> int:
         if not self.slm:
