@@ -2126,6 +2126,101 @@ def mount_fuse(
             temp_volicon.unlink()
 
 
+def format_volume(
+    image: Path,
+    driver: Optional[Path],
+    block_size: Optional[int],
+    partition: str,
+    volname: str = "Empty",
+    debug: bool = False,
+):
+    import amitools.fs.DosType as DosType
+
+    # Get partition dostype from RDB
+    part_info = get_partition_info(image, block_size, partition)
+    dostype = part_info["dostype"]
+    if dostype is None:
+        raise SystemExit(f"Could not determine dostype for partition '{partition}'.")
+    dt_str = DosType.num_to_tag_str(dostype)
+
+    # Resolve driver
+    temp_driver = None
+    if driver is None:
+        try:
+            result = extract_embedded_driver(image, block_size, partition)
+        except IOError as e:
+            raise SystemExit(f"Error: {e}")
+        if result is None:
+            raise SystemExit(
+                "No embedded filesystem driver found for this partition.\n"
+                "You need to specify a filesystem handler with --driver"
+            )
+        temp_driver, _, _ = result
+        driver = temp_driver
+        driver_desc = f"{dt_str}/0x{dostype:08x} (from RDB)"
+    else:
+        driver_desc = str(driver)
+
+    print(__banner__)
+    print(f"Formatting partition '{partition}' in {image}")
+    print(f"Filesystem driver: {driver_desc}")
+    print(f"Volume name: {volname}")
+    print(f"DOS type: {dt_str} (0x{dostype:08x})")
+
+    try:
+        bridge = HandlerBridge(
+            image,
+            driver,
+            block_size=block_size,
+            read_only=False,
+            debug=debug,
+            partition=partition,
+        )
+
+        # Inhibit the volume so the handler releases it for formatting
+        bridge.launcher.send_inhibit(bridge.state, True)
+        replies = bridge._run_until_replies()
+        if debug and replies:
+            _, _, r1, r2 = replies[-1]
+            print(f"[amifuse] INHIBIT reply: res1={r1} res2={r2}")
+
+        # Allocate volume name BSTR and send ACTION_FORMAT
+        _, volname_bptr = bridge.launcher.alloc_bstr(volname, label="FormatVolName")
+        bridge.launcher.send_format(bridge.state, volname_bptr, dostype)
+        replies = bridge._run_until_replies()
+
+        if not replies:
+            raise SystemExit("Format failed: no reply from handler.")
+
+        _, pkt_addr, res1, res2 = replies[-1]
+        if res1 == 0:
+            error_msgs = {
+                205: "Object in use",
+                218: "Not a valid DOS disk",
+                225: "Not a DOS disk",
+                226: "Wrong disk type",
+                232: "Disk is write-protected",
+            }
+            error_desc = error_msgs.get(res2, f"error code {res2}")
+            raise SystemExit(f"Format failed: {error_desc}")
+
+        if debug:
+            print(f"[amifuse] FORMAT reply: res1={res1} res2={res2}")
+
+        # Uninhibit to re-mount the newly formatted volume
+        bridge.launcher.send_inhibit(bridge.state, False)
+        bridge._run_until_replies()
+
+        # Flush to ensure data is written
+        bridge.launcher.send_flush(bridge.state)
+        bridge._run_until_replies()
+
+        print(f"Format complete. Volume '{volname}' created on partition '{partition}'.")
+    finally:
+        if temp_driver is not None and temp_driver.exists():
+            temp_driver.unlink()
+
+
 __version__ = "v0.3.0"
 __banner__ = f"amifuse {__version__} - Copyright (C) 2025-2026 by Stefan Reinauer"
 
@@ -2248,6 +2343,16 @@ def cmd_mount(args):
             stats.print_stats()
 
 
+def cmd_format(args):
+    """Handle the 'format' subcommand."""
+    format_volume(
+        args.image, args.driver, args.block_size,
+        partition=args.partition,
+        volname=args.volname,
+        debug=args.debug,
+    )
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=f"{__banner__}\n\n"
@@ -2270,6 +2375,12 @@ commands:
     --debug                   Enable debug logging of FUSE operations.
     --trace                   Enable vamos instruction tracing (very noisy).
     --profile                 Enable profiling and write stats to profile.txt.
+
+  format <image> <partition> [volname]
+                              Format an Amiga partition.
+    --driver PATH             Filesystem binary (default: extract from RDB).
+    --block-size N            Override block size (defaults to auto/512).
+    --debug                   Enable debug logging.
 """,
     )
     parser.add_argument(
@@ -2327,6 +2438,22 @@ commands:
         help="Convert Amiga .info icons to native macOS icons (experimental)."
     )
     mount_parser.set_defaults(func=cmd_mount)
+
+    # format subcommand
+    format_parser = subparsers.add_parser(
+        "format", help="Format an Amiga partition."
+    )
+    format_parser.add_argument("image", type=Path, help="Disk image file")
+    format_parser.add_argument("partition", type=str, help="Partition name (e.g. DH0) or index.")
+    format_parser.add_argument("volname", nargs="?", default="Empty", help="Volume name (default: Empty)")
+    format_parser.add_argument("--driver", type=Path, help="Filesystem binary (default: extract from RDB if available)")
+    format_parser.add_argument(
+        "--block-size", type=int, help="Override block size (defaults to auto/512)."
+    )
+    format_parser.add_argument(
+        "--debug", action="store_true", help="Enable debug logging."
+    )
+    format_parser.set_defaults(func=cmd_format)
 
     args = parser.parse_args(argv)
     args.func(args)

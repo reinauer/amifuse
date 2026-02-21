@@ -110,6 +110,8 @@ ACTION_DELETE_OBJECT = 16
 ACTION_RENAME_OBJECT = 17
 ACTION_CREATE_DIR = 22
 ACTION_FLUSH = 27
+ACTION_FORMAT = 1020
+ACTION_INHIBIT = 31
 OFFSET_BEGINNING = -1
 OFFSET_CURRENT = 0
 OFFSET_END = 1
@@ -1012,6 +1014,14 @@ class HandlerLauncher:
     def send_flush(self, state: HandlerLaunchState):
         """ACTION_FLUSH: flush filesystem buffers."""
         return self.send_packet(state, ACTION_FLUSH, [])
+
+    def send_inhibit(self, state: HandlerLaunchState, inhibit: bool):
+        """ACTION_INHIBIT: dp_Arg1=DOSTRUE (-1) to inhibit, DOSFALSE (0) to uninhibit."""
+        return self.send_packet(state, ACTION_INHIBIT, [-1 if inhibit else 0])
+
+    def send_format(self, state: HandlerLaunchState, volname_bptr: int, dostype: int):
+        """ACTION_FORMAT: dp_Arg1=volume name BSTR (BPTR), dp_Arg2=DosType."""
+        return self.send_packet(state, ACTION_FORMAT, [volname_bptr, dostype])
 
     def _alloc_signal_bit(self) -> int:
         """Reserve a signal bit from our local bitmap."""
