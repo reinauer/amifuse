@@ -2355,6 +2355,7 @@ def cmd_format(args):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
+        prog="amifuse",
         description=f"{__banner__}\n\n"
         "Mount Amiga filesystem images via FUSE.",
         formatter_class=argparse.RawDescriptionHelpFormatter,

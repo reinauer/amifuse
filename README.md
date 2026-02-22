@@ -67,6 +67,14 @@ sudo apt install fuse libfuse-dev
 sudo dnf install fuse fuse-devel
 ```
 
+### Running from source (without installing)
+
+To run amifuse directly from a local checkout (useful for development/debugging):
+
+```bash
+python3 -m amifuse mount disk.hdf
+```
+
 ## Quick Start
 
 To download a test PFS3 disk image and the pfs3aio handler:
