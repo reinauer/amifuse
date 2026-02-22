@@ -45,10 +45,12 @@ def _parse_fib(mem, fib_addr: int) -> Dict:
       fib_Protection: LONG at 116
       fib_EntryType: LONG at 120
       fib_Size: ULONG at 124
+      fib_NumBlocks: LONG at 128
     """
     dir_type = mem.r32s(fib_addr + 4)   # fib_DirEntryType (signed LONG)
     protection = mem.r32(fib_addr + 116)  # fib_Protection (LONG)
-    size = mem.r32(fib_addr + 124)      # fib_Size (unsigned ULONG)
+    size = mem.r32(fib_addr + 124)      # fib_Size (ULONG)
+    num_blocks = mem.r32s(fib_addr + 128)      # fib_NumBlocks (LONG)
     name_bytes = mem.r_block(fib_addr + 8, 108)  # fib_FileName starts at offset 8
     name_len = name_bytes[0]
     name = name_bytes[1 : 1 + name_len].decode("latin-1", errors="ignore")
@@ -57,6 +59,7 @@ def _parse_fib(mem, fib_addr: int) -> Dict:
         "size": size,
         "name": name,
         "protection": protection,
+        "num_blocks": num_blocks,
     }
 
 
@@ -1312,6 +1315,8 @@ class AmigaFuseFS(Operations):
             "st_atime": now,
             "st_uid": self._uid,
             "st_gid": self._gid,
+            "st_blksize": 512, # TODO: compute from ACTION_DISK_INFO?
+            "st_blocks": info["num_blocks"]
         }
         # Set UF_HIDDEN on all .info files when icons mode is enabled
         # This hides the Amiga icon files since we display icons via xattrs
@@ -1356,6 +1361,8 @@ class AmigaFuseFS(Operations):
                 "st_atime": int(now),
                 "st_uid": self._uid,
                 "st_gid": self._gid,
+                "st_blksize": 512, # TODO: compute from ACTION_DISK_INFO?
+                "st_blocks": ent["num_blocks"]
             }
             # Set UF_HIDDEN on .info files when icons mode is enabled
             if self._icons_enabled and (name.endswith(".info") or name.lower().endswith(".info")):
