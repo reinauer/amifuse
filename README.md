@@ -95,6 +95,18 @@ mkdir -p ./mnt
 amifuse mount pfs.hdf --mountpoint ./mnt
 ```
 
+To compare this checkout against `../amifuse-0.2` using the bundled `pfs.hdf`
+and `pfs3aio`, run:
+
+```bash
+make bench-pfs
+```
+
+This benchmark bypasses macFUSE and measures the handler startup time, a full
+recursive directory walk equivalent to `find`, and a small set of file reads.
+You can override the defaults with `PFS_BENCH_BASELINE`, `PFS_BENCH_IMAGE`,
+`PFS_BENCH_DRIVER`, and `PFS_BENCH_REPEAT`.
+
 ## Usage
 
 amifuse uses subcommands for different operations:

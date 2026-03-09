@@ -11,6 +11,10 @@ all: run
 DOWNLOAD_DIR = Downloads
 PFS_7Z = $(DOWNLOAD_DIR)/pfs.7z
 PFS3AIO = $(DOWNLOAD_DIR)/pfs3aio
+PFS_BENCH_BASELINE ?= ../amifuse-0.2
+PFS_BENCH_IMAGE ?= pfs.hdf
+PFS_BENCH_DRIVER ?= pfs3aio
+PFS_BENCH_REPEAT ?= 3
 
 # MD5 checksums for verification
 PFS_7Z_MD5 = 305e6a720b88e03655cd9ff56d7950bc
@@ -74,9 +78,16 @@ unpack: download
 	@7z x $(PFS_7Z)
 	@cp $(PFS3AIO) .
 
+bench-pfs:
+	@python3 tools/pfs_benchmark.py \
+		--baseline "$(PFS_BENCH_BASELINE)" \
+		--candidate . \
+		--image "$(PFS_BENCH_IMAGE)" \
+		--driver "$(PFS_BENCH_DRIVER)" \
+		--repeat "$(PFS_BENCH_REPEAT)"
+
 run:
 	@echo "Run with:"
-	@echo " $$ python3 -m amifuse.fuse_fs \\"
+	@echo " $$ python3 -m amifuse mount pfs.hdf \\"
 	@echo "           --driver pfs3aio \\"
-	@echo "           --image 'pfs.hdf' \\"
 	@echo "           --mountpoint ./mnt"
