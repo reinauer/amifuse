@@ -137,7 +137,7 @@ class HandlerBridge:
             dos_env = boot["part"].part_blk.dos_env
             blk_per_cyl = dos_env.surfaces * dos_env.blk_per_trk
             part_end_byte = (dos_env.high_cyl + 1) * blk_per_cyl * self.backend.block_size
-            image_size = os.path.getsize(str(image))
+            image_size = self.backend.blkdev.img_file.size
             if part_end_byte > image_size:
                 part_start_byte = dos_env.low_cyl * blk_per_cyl * self.backend.block_size
                 part_name = partition or f"#{boot['part'].num}"
